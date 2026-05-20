@@ -50,7 +50,7 @@ for event in parser.parse(graph.stream(input_data, stream_mode="updates")):
 | `DisplayEvent` | Rich inline content (dataframe, image, plotly, html, json) from `display_inline`-style tools |
 | `InterruptEvent` | Human-in-the-loop interrupt requiring decision |
 | `StateUpdateEvent` | Non-message state updates (opt-in) |
-| `UsageEvent` | Token usage metadata (input/output/total tokens) |
+| `UsageEvent` | Token usage metadata (input/output/total/cache_read/cache_creation tokens) |
 | `CustomEvent` | Custom data emitted via `get_stream_writer()` |
 | `ValuesEvent` | Full state snapshot from `stream_mode="values"` (v2) |
 | `DebugEvent` | Debug, checkpoint, or task trace from v2 streaming |
@@ -135,6 +135,22 @@ for event in parser.parse(graph.stream(input_data, config=config)):
         break
 ```
 
+Supported decision types (deepagents 0.6+ / LangGraph 1.1+): `"approve"`, `"reject"`, `"edit"`, `"respond"`.
+
+```python
+# Edit args before approval — emits the modern ``edited_action`` shape
+resume = event.create_resume(
+    "edit",
+    args_modifier=lambda args: {**args, "safe": True},
+)
+
+# Reply with text in place of running the tool
+resume = event.create_resume("respond", response="Please rephrase that.")
+
+# For older LangGraph runtimes that expect ``{"type": "edit", "args": ...}``:
+resume = event.create_resume("edit", args_modifier=fn, use_edited_action=False)
+```
+
 ### Custom Tool Extractors
 
 ```python
@@ -217,12 +233,14 @@ for event in parser.parse(stream):
             print(event.content, end="")
 ```
 
-For [LangChain deep agents](https://docs.langchain.com/oss/python/deepagents/subagents), `ContentEvent.agent_name` is extracted from `lc_agent_name` metadata:
+For [LangChain deep agents](https://docs.langchain.com/oss/python/deepagents/subagents), `ContentEvent.agent_name` is extracted from `lc_agent_name` metadata, and `ContentEvent.is_subagent` is set to `True` when deepagents (>= 0.6) tags the run with `ls_agent_type="subagent"`. Match on either signal:
 
 ```python
-case ContentEvent(content=text, agent_name=name):
-    label = f"[{name}] " if name else ""
+case ContentEvent(content=text, agent_name=name, is_subagent=True):
+    label = f"[{name or 'subagent'}] "
     print(f"{label}{text}", end="")
+case ContentEvent(content=text):
+    print(text, end="")
 ```
 
 ### Custom Stream Mode

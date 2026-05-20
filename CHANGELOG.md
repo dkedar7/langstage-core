@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.9] - 2026-05-19
+
+Compatibility refresh for **langgraph 1.2**, **langchain-core 1.4**, and **deepagents 0.6**.
+
+### Added
+- `UsageEvent.cache_read_tokens` and `UsageEvent.cache_creation_tokens` — populated from `usage_metadata.input_token_details` (`cache_read`, `cache_creation`). Default 0; omitted from `to_dict()` when zero.
+- `ContentEvent.is_subagent` and `ReasoningEvent.is_subagent` — set to `True` when stream metadata carries `ls_agent_type == "subagent"` (deepagents >= 0.6). Lets consumers distinguish subagent output even when `lc_agent_name` is absent.
+- `"respond"` decision support in `InterruptEvent.build_decisions()` / `create_resume()`: pass `response="..."` to send a text reply in place of the tool call. Matches the deepagents 0.6 decision verb set.
+- `InterruptEvent.build_decisions(..., use_edited_action=False)` escape hatch for runtimes that still expect the legacy `{"type": "edit", "args": ...}` resume shape.
+
+### Changed
+- `extract_message_content()` now skips the full set of non-text content blocks defined by langchain-core 1.4 standard content blocks: `tool_call`, `tool_use`, `tool_call_chunk`, `server_tool_call`, `server_tool_call_chunk`, `server_tool_result`, `invalid_tool_call`, `image`, `audio`, `video`, `file` (plus the existing `reasoning` / `thinking`). Previously these could leak as stringified dicts into `ContentEvent.content`. Tool lifecycle and reasoning events are unchanged.
+- `InterruptEvent.build_decisions("edit", ...)` now emits the modern `{"type": "edit", "edited_action": {"name", "args"}}` shape by default, matching LangGraph 1.1+ / deepagents 0.5+. Set `use_edited_action=False` for the legacy shape.
+- `InterruptEvent.allowed_decisions` defaults to `{"approve", "reject", "edit", "respond"}` when no review configs are present (was `{"approve", "reject"}`).
+- Dev dependency bumped: `langgraph>=1.1.0`, `langchain-core>=1.4.0`.
+
+### Notes
+- **No breaking change for default tool extractors**: deepagents 0.6 ships new built-in tools (`glob_search`, `grep_search`, `execute`, `start_async_task` / `check_async_task` / `update_async_task` / `cancel_async_task` / `list_async_tasks`, plus QuickJS `CodeInterpreterMiddleware`). These flow through the regular `ToolCallStartEvent` / `ToolCallEndEvent` lifecycle — no parser change required.
+- **v3 `stream_events` typed projections** (LangGraph 1.2 beta) are not yet supported. v2 `StreamPart` parsing remains the recommended path for `stream()` / `astream()`.
+
 ## [0.1.8] - 2026-04-18
 
 ### Added
