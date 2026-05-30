@@ -305,14 +305,15 @@ class UpdatesHandler:
         content = getattr(message, 'content', None)
         artifact = getattr(message, 'artifact', None)
 
-        # Skip if tool should be skipped
-        if tool_name in self._skip_tools:
-            return
-
         # Check for errors
         is_error, error_message = detect_tool_error(message)
 
-        # Try to extract special content
+        # Try to extract special content FIRST — extractors run even for
+        # skipped tools. Skipping a tool hides its lifecycle (start/end)
+        # events, but the whole point of an extractor is to surface that
+        # tool's content in another form (e.g. write_todos -> todos,
+        # think_tool -> reflection). Gating the extractor on skip_tools would
+        # silently drop those, which is what hosts use skip_tools to keep.
         # Prefer artifact over content (artifact carries full data from
         # tools using response_format="content_and_artifact")
         extractor = self._extractors.get(tool_name) if tool_name else None
@@ -329,6 +330,11 @@ class UpdatesHandler:
             except Exception:
                 # Graceful degradation - continue without extraction
                 pass
+
+        # Skipped tools emit no lifecycle end event (their start was already
+        # suppressed in _process_ai_message).
+        if tool_name in self._skip_tools:
+            return
 
         # Emit ToolCallEndEvent if tracking lifecycle
         if self._track_tool_lifecycle and tool_call_id:

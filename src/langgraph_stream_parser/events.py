@@ -638,7 +638,9 @@ class ErrorEvent:
         }
 
 
-def event_to_dict(event: "StreamEvent") -> dict[str, Any]:
+def event_to_dict(
+    event: "StreamEvent", *, max_result_len: int = 500
+) -> dict[str, Any]:
     """Convert any StreamEvent to a JSON-serializable dict.
 
     This is a convenience function for web APIs that need to serialize
@@ -646,6 +648,10 @@ def event_to_dict(event: "StreamEvent") -> dict[str, Any]:
 
     Args:
         event: Any StreamEvent instance.
+        max_result_len: Maximum length for the ``result`` string of a
+            ``ToolCallEndEvent`` (truncated with an ellipsis if longer).
+            Ignored for every other event type. Raise this when a UI
+            needs to show full tool output instead of a preview.
 
     Returns:
         A dict with a "type" key and event-specific fields.
@@ -653,10 +659,17 @@ def event_to_dict(event: "StreamEvent") -> dict[str, Any]:
     Example:
         for event in parser.parse(stream):
             await websocket.send_json(event_to_dict(event))
+
+        # Show full tool results in a rich UI:
+        event_to_dict(tool_end_event, max_result_len=50_000)
     """
-    if hasattr(event, "to_dict"):
-        return event.to_dict()
-    return {"type": "unknown", "event": str(event)}
+    to_dict = getattr(event, "to_dict", None)
+    if to_dict is None:
+        return {"type": "unknown", "event": str(event)}
+    # Only ToolCallEndEvent.to_dict accepts max_result_len.
+    if isinstance(event, ToolCallEndEvent):
+        return to_dict(max_result_len=max_result_len)
+    return to_dict()
 
 
 # Union type for all events - useful for type hints

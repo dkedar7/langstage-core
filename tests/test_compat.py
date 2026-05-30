@@ -151,6 +151,32 @@ class TestStreamGraphUpdates:
         tool_updates = [u for u in updates if "tool_calls" in u]
         assert len(tool_updates) >= 1
 
+    def test_write_todos_surfaces_todo_list(self):
+        """write_todos is in skip_tools (kept out of tool_calls noise) but its
+        result must STILL surface as a todo_list update — consumers like the
+        deepagent-lab todo sidebar depend on it. Regression guard: skip_tools
+        must hide a tool's lifecycle without suppressing its extractor."""
+        mock_agent = MagicMock()
+        mock_agent.stream.return_value = iter([WRITE_TODOS_MESSAGE])
+
+        updates = list(stream_graph_updates(mock_agent, {}))
+
+        todo_updates = [u for u in updates if "todo_list" in u]
+        assert len(todo_updates) == 1
+        # ...and it must not leak as a tool_calls update.
+        assert not [u for u in updates if "tool_calls" in u]
+
+    def test_think_tool_surfaces_as_chunk(self):
+        """think_tool is skipped from tool_calls but its reflection must still
+        surface (as a chunk update) so the UI shows the agent's thinking."""
+        mock_agent = MagicMock()
+        mock_agent.stream.return_value = iter([THINK_TOOL_MESSAGE])
+
+        updates = list(stream_graph_updates(mock_agent, {}))
+
+        chunk_updates = [u for u in updates if "chunk" in u]
+        assert len(chunk_updates) >= 1
+
     def test_interrupt(self):
         mock_agent = MagicMock()
         mock_agent.stream.return_value = iter([INTERRUPT_WITH_ACTIONS])

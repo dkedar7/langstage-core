@@ -51,6 +51,7 @@ from .events import (
 from .extractors.base import ToolExtractor
 from .extractors.builtins import ThinkToolExtractor, TodoExtractor, DisplayInlineExtractor
 from .resume import create_resume_input, prepare_agent_input
+from .host import load_agent_spec, HostConfig, Workspace
 from .compat import (
     stream_graph_updates,
     astream_graph_updates,
@@ -58,7 +59,7 @@ from .compat import (
     aresume_graph_from_interrupt,
 )
 
-__version__ = "0.1.9"
+__version__ = "0.2.0"
 
 __all__ = [
     # Main parser
@@ -87,6 +88,10 @@ __all__ = [
     # Resume utilities
     "create_resume_input",
     "prepare_agent_input",
+    # Host conventions
+    "load_agent_spec",
+    "HostConfig",
+    "Workspace",
     # Serialization
     "event_to_dict",
     # Legacy/compat functions
