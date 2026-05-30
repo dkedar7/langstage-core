@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/header.svg" alt="langgraph-stream-parser" width="100%">
+</p>
+
 # langgraph-stream-parser
 
 Universal parser for LangGraph streaming outputs. Normalizes complex, variable output shapes from `graph.stream()` and `graph.astream()` into consistent, typed event objects.
