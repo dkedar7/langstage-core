@@ -164,3 +164,177 @@ class DisplayInlineExtractor:
             return content
 
         return None
+
+
+def _parse_json_content(content: Any) -> dict[str, Any] | None:
+    """Best-effort JSON parse — accepts str or dict, returns None otherwise."""
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+class SkillManageExtractor:
+    """Extractor for skill_manage tool calls (agentskills.io standard).
+
+    Agents that follow the agentskills.io specification expose a tool
+    (commonly named ``skill_manage``) for creating, patching, deleting,
+    or pinning SKILL.md files in a procedural-memory library. This
+    extractor surfaces those mutations as inline events so hosts can
+    render "skill created: pdf-merging" alongside the raw tool result.
+
+    Handles formats:
+        - JSON string with ``action`` + ``name`` keys
+        - Dict with the same keys
+        - Plain text containing one of the known action verbs
+
+    Action → extracted_subtype mapping:
+        create / write_file → skill_created
+        patch               → skill_updated
+        pin / unpin         → skill_updated
+        delete              → skill_deleted
+    """
+
+    tool_name = "skill_manage"
+    extracted_type = "skill_event"
+
+    _ACTION_TO_TYPE = {
+        "create": "skill_created",
+        "patch": "skill_updated",
+        "write_file": "skill_updated",
+        "delete": "skill_deleted",
+        "pin": "skill_updated",
+        "unpin": "skill_updated",
+    }
+
+    def extract(self, content: Any) -> dict[str, Any] | None:
+        """Extract skill action + name from a skill_manage result.
+
+        Args:
+            content: JSON string, dict, or plain text from the tool.
+
+        Returns:
+            Dict with ``action``, ``name`` (when present), and
+            ``extracted_subtype``. ``None`` when the content doesn't
+            look like a skill_manage result.
+        """
+        parsed = _parse_json_content(content)
+        if parsed is None:
+            if not isinstance(content, str) or not content:
+                return None
+            text = content.lower()
+            for action, etype in self._ACTION_TO_TYPE.items():
+                if action in text:
+                    return {"action": action, "extracted_subtype": etype}
+            return None
+
+        action = parsed.get("action")
+        name = parsed.get("name")
+        if action is None:
+            return None
+        etype = self._ACTION_TO_TYPE.get(action, "skill_event")
+        out: dict[str, Any] = {"action": action, "extracted_subtype": etype}
+        if name is not None:
+            out["name"] = name
+        return out
+
+
+class SkillViewExtractor:
+    """Extractor for skill_view tool calls (agentskills.io standard).
+
+    Emits a ``skill_loaded`` event when the agent pulls a SKILL.md body
+    into its context via the ``skill_view(name)`` tool. Hosts can render
+    this differently from creation / update — it's a read, not a
+    mutation, and represents the agent activating procedural memory.
+    """
+
+    tool_name = "skill_view"
+    extracted_type = "skill_loaded"
+
+    def extract(self, content: Any) -> dict[str, Any] | None:
+        """Note that a skill body was loaded; carry the size as data."""
+        if not content:
+            return None
+        return {"loaded": True, "body_chars": len(str(content))}
+
+
+class CompressionExtractor:
+    """Extractor for context-compression events.
+
+    When an agent's compression middleware (e.g.
+    ``langchain.agents.middleware.SummarizationMiddleware`` or a custom
+    implementation) replaces the middle of a long conversation with a
+    summary, it can emit a synthetic ``__compression__`` tool message
+    so the host UI can show a banner like "context compressed: 47k →
+    9k tokens (5x)".
+
+    Expected payload (all fields optional, extractor surfaces what it
+    finds):
+        - before_tokens: int
+        - after_tokens: int
+        - ratio: float
+        - section_count: int
+        - skipped: bool
+        - reason: str
+    """
+
+    tool_name = "__compression__"
+    extracted_type = "compression_summary"
+
+    def extract(self, content: Any) -> dict[str, Any] | None:
+        parsed = _parse_json_content(content)
+        if parsed is None:
+            return None
+        keys = {"before_tokens", "after_tokens", "ratio", "section_count", "skipped", "reason"}
+        out = {k: parsed[k] for k in keys if k in parsed}
+        return out or None
+
+
+class MemoryExtractor:
+    """Extractor for memory tool actions.
+
+    Agents that expose a frozen-snapshot memory tool (commonly named
+    ``memory``) for managing persistent MEMORY.md / USER.md files
+    surface their action through this extractor. Distinguishes ``target``
+    so the two streams render separately.
+
+    Action → extracted_subtype mapping:
+        add     → memory_added
+        replace → memory_replaced
+        remove  → memory_removed
+        read    → memory_read
+    """
+
+    tool_name = "memory"
+    extracted_type = "memory_updated"
+
+    _ACTION_TO_TYPE = {
+        "add": "memory_added",
+        "replace": "memory_replaced",
+        "remove": "memory_removed",
+        "read": "memory_read",
+    }
+
+    def extract(self, content: Any) -> dict[str, Any] | None:
+        parsed = _parse_json_content(content)
+        if parsed is None:
+            return None
+        action = parsed.get("action")
+        target = parsed.get("target")
+        if action is None or target is None:
+            return None
+        etype = self._ACTION_TO_TYPE.get(action, "memory_updated")
+        out: dict[str, Any] = {
+            "action": action,
+            "target": target,
+            "extracted_subtype": etype,
+        }
+        if "index" in parsed:
+            out["index"] = parsed["index"]
+        return out

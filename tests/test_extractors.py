@@ -3,9 +3,13 @@ import pytest
 import json
 
 from langgraph_stream_parser.extractors.builtins import (
+    CompressionExtractor,
+    DisplayInlineExtractor,
+    MemoryExtractor,
+    SkillManageExtractor,
+    SkillViewExtractor,
     ThinkToolExtractor,
     TodoExtractor,
-    DisplayInlineExtractor,
 )
 from langgraph_stream_parser.extractors.messages import (
     extract_message_content,
@@ -368,3 +372,164 @@ class TestProcessInterrupt:
         assert result["action_requests"][0]["tool"] == "bash"
         assert len(result["review_configs"]) == 1
         assert "approve" in result["review_configs"][0]["allowed_decisions"]
+
+
+# ── agentskills.io / Hermes-pattern extractors ────────────────────────
+
+
+class TestSkillManageExtractor:
+    def setup_method(self):
+        self.extractor = SkillManageExtractor()
+
+    def test_protocol_attrs(self):
+        assert self.extractor.tool_name == "skill_manage"
+        assert self.extractor.extracted_type == "skill_event"
+
+    def test_extract_create_from_json(self):
+        result = self.extractor.extract(json.dumps({"action": "create", "name": "pdf-merging"}))
+        assert result == {
+            "action": "create",
+            "name": "pdf-merging",
+            "extracted_subtype": "skill_created",
+        }
+
+    def test_extract_patch_from_dict(self):
+        result = self.extractor.extract({"action": "patch", "name": "csv-cleaning"})
+        assert result == {
+            "action": "patch",
+            "name": "csv-cleaning",
+            "extracted_subtype": "skill_updated",
+        }
+
+    def test_extract_write_file_maps_to_updated(self):
+        result = self.extractor.extract({"action": "write_file", "name": "x"})
+        assert result["extracted_subtype"] == "skill_updated"
+
+    def test_extract_delete(self):
+        result = self.extractor.extract({"action": "delete", "name": "stale-skill"})
+        assert result["extracted_subtype"] == "skill_deleted"
+
+    def test_extract_pin_unpin(self):
+        for action in ("pin", "unpin"):
+            result = self.extractor.extract({"action": action, "name": "x"})
+            assert result["extracted_subtype"] == "skill_updated"
+
+    def test_extract_without_name(self):
+        # action without name is still useful — surfaces the event class
+        result = self.extractor.extract({"action": "create"})
+        assert result == {"action": "create", "extracted_subtype": "skill_created"}
+
+    def test_extract_falls_back_to_text_scan(self):
+        result = self.extractor.extract("Skill created successfully.")
+        assert result == {"action": "create", "extracted_subtype": "skill_created"}
+
+    def test_extract_returns_none_on_empty(self):
+        assert self.extractor.extract(None) is None
+        assert self.extractor.extract("") is None
+        assert self.extractor.extract(123) is None
+
+    def test_extract_returns_none_on_unrelated_text(self):
+        assert self.extractor.extract("Some unrelated response") is None
+
+    def test_extract_unknown_action_uses_generic_subtype(self):
+        result = self.extractor.extract({"action": "frobnicate", "name": "x"})
+        assert result["extracted_subtype"] == "skill_event"
+
+
+class TestSkillViewExtractor:
+    def setup_method(self):
+        self.extractor = SkillViewExtractor()
+
+    def test_protocol_attrs(self):
+        assert self.extractor.tool_name == "skill_view"
+        assert self.extractor.extracted_type == "skill_loaded"
+
+    def test_extract_body(self):
+        body = "Here is how to merge PDFs: ..."
+        result = self.extractor.extract(body)
+        assert result == {"loaded": True, "body_chars": len(body)}
+
+    def test_extract_none_on_empty(self):
+        assert self.extractor.extract(None) is None
+        assert self.extractor.extract("") is None
+        assert self.extractor.extract(0) is None
+
+
+class TestCompressionExtractor:
+    def setup_method(self):
+        self.extractor = CompressionExtractor()
+
+    def test_protocol_attrs(self):
+        assert self.extractor.tool_name == "__compression__"
+        assert self.extractor.extracted_type == "compression_summary"
+
+    def test_extract_full_payload(self):
+        payload = {
+            "before_tokens": 47000,
+            "after_tokens": 9000,
+            "ratio": 5.2,
+            "section_count": 13,
+        }
+        result = self.extractor.extract(json.dumps(payload))
+        assert result == payload
+
+    def test_extract_partial_payload(self):
+        result = self.extractor.extract({"ratio": 2.0, "skipped": False})
+        assert result == {"ratio": 2.0, "skipped": False}
+
+    def test_extract_ignores_unknown_keys(self):
+        result = self.extractor.extract({"ratio": 1.5, "irrelevant": "foo"})
+        assert result == {"ratio": 1.5}
+
+    def test_extract_none_on_empty_or_malformed(self):
+        assert self.extractor.extract(None) is None
+        assert self.extractor.extract("") is None
+        assert self.extractor.extract("not json") is None
+        assert self.extractor.extract({}) is None
+
+
+class TestMemoryExtractor:
+    def setup_method(self):
+        self.extractor = MemoryExtractor()
+
+    def test_protocol_attrs(self):
+        assert self.extractor.tool_name == "memory"
+        assert self.extractor.extracted_type == "memory_updated"
+
+    def test_extract_add_user(self):
+        result = self.extractor.extract(
+            json.dumps({"action": "add", "target": "user", "entry": "..."})
+        )
+        assert result == {
+            "action": "add",
+            "target": "user",
+            "extracted_subtype": "memory_added",
+        }
+
+    def test_extract_replace_with_index(self):
+        result = self.extractor.extract(
+            {"action": "replace", "target": "memory", "index": 3, "entry": "..."}
+        )
+        assert result == {
+            "action": "replace",
+            "target": "memory",
+            "extracted_subtype": "memory_replaced",
+            "index": 3,
+        }
+
+    def test_extract_remove(self):
+        result = self.extractor.extract({"action": "remove", "target": "memory", "index": 0})
+        assert result["extracted_subtype"] == "memory_removed"
+
+    def test_extract_read(self):
+        result = self.extractor.extract({"action": "read", "target": "memory"})
+        assert result["extracted_subtype"] == "memory_read"
+
+    def test_extract_requires_action_and_target(self):
+        assert self.extractor.extract({"action": "add"}) is None
+        assert self.extractor.extract({"target": "user"}) is None
+
+    def test_extract_none_on_empty(self):
+        assert self.extractor.extract(None) is None
+        assert self.extractor.extract("") is None
+        assert self.extractor.extract("not json") is None
