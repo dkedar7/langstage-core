@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0] - 2026-06-02
+
+Repositions langgraph-stream-parser as the **shared runtime substrate** for the deep-agent host family (`cowork-dash`, `deepagent-lab`, `deepagent-code`, `deepagent-vscode`).
+
+### Added
+- **`host/` submodule** — shared host conventions:
+  - `load_agent_spec("path.py:var" | "module:var")` — strict agent-spec loader (the `:object` suffix is required).
+  - `HostConfig` — layered config resolver: `defaults < deepagents.toml < DEEPAGENT_* env < overrides`, with per-field source tracking. Subclass and extend the `_ENV` / `_TOML` maps (merged across the MRO) to add host-specific keys. `DEEPAGENT_AGENT_SPEC` is the canonical agent-spec env var.
+  - `load_toml_config()` — loads + deep-merges global `~/.deepagents/config.toml` (override dir via `DEEPAGENTS_CONFIG_HOME`) and the nearest project `deepagents.toml`.
+  - `Workspace` — workspace-root wrapper with traversal-safe `subpath()`.
+  - `python -m langgraph_stream_parser.host` (and `HostConfig.describe()`) — prints each resolved value, its source, and the env var / TOML key that sets it.
+- **`adapters.SessionAdapter`** — session-scoped streaming for web hosts: per-session event queue, cancellation, side-channel `push_event()`, and persistent SSE that survives client reconnects.
+- **`demo.create_default_agent()`** — shared filesystem-backed default agent factory (behind the `[demo]` extra; lazy-imports `deepagents`).
+- **Four built-in extractors** for the agentskills.io / Hermes pattern, wired into the default set so every host gets them through `compat`: `SkillManageExtractor` (`skill_manage`), `SkillViewExtractor` (`skill_view`), `CompressionExtractor` (`__compression__`), `MemoryExtractor` (`memory`).
+- `event_to_dict(event, *, max_result_len=...)` — lets hosts drop bespoke serializer shims.
+
+### Fixed
+- `skip_tools` previously suppressed a tool's **extractor** as well as its lifecycle events, silently dropping `todo_list` / `reflection`. Extractors now run for skipped tools; only the lifecycle (start/end) events are suppressed.
+
 ## [0.1.9] - 2026-05-19
 
 Compatibility refresh for **langgraph 1.2**, **langchain-core 1.4**, and **deepagents 0.6**.
