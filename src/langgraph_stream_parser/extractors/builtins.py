@@ -338,3 +338,47 @@ class MemoryExtractor:
         if "index" in parsed:
             out["index"] = parsed["index"]
         return out
+
+
+class GenericToolExtractor:
+    """Fallback extractor for any tool without a dedicated extractor.
+
+    Per-tool extractors (``ThinkToolExtractor``, ``SkillManageExtractor``,
+    …) are the right tool for surfacing *structured* domain content. But
+    when an application wires custom tools the parser doesn't know about,
+    those tool calls only emit ``ToolCallStartEvent`` / ``ToolCallEndEvent``
+    — never ``ToolExtractedEvent`` — so hosts that switch on extracted
+    events to render rich cards have no signal to act on.
+
+    Registering this as a fallback (``StreamParser(default_extractor=
+    GenericToolExtractor())``) closes that gap: any tool name without a
+    specific extractor will emit a ``ToolExtractedEvent`` of
+    ``extracted_type="tool_call"`` whose data preserves the raw content
+    (and the optional artifact) so downstream renderers can build a
+    generic "tool callout" card without per-tool knowledge.
+
+    This is intentionally *opt-in* via the new
+    :class:`~langgraph_stream_parser.StreamParser` ``default_extractor``
+    kwarg. The historical behaviour (only emit ``ToolExtractedEvent`` for
+    tools with explicit extractors) is preserved by default so existing
+    hosts that switch on specific extracted types don't suddenly receive
+    new events.
+
+    Notes:
+        - ``tool_name`` is the sentinel ``"*"`` for documentation / hosts
+          that introspect ``parser._default_extractor``; the parser
+          never indexes ``_extractors`` by this value.
+        - Returns ``None`` when content is also ``None`` so a tool that
+          legitimately returns nothing doesn't fire a spurious empty
+          card. Empty strings and empty dicts still surface (they may
+          carry meaning to the host's renderer).
+    """
+
+    tool_name = "*"  # sentinel; not used for dispatch lookup
+    extracted_type = "tool_call"
+
+    def extract(self, content: Any) -> dict[str, Any] | None:
+        if content is None:
+            return None
+        out: dict[str, Any] = {"content": content}
+        return out

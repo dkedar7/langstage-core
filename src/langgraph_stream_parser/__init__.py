@@ -49,7 +49,12 @@ from .events import (
     event_to_dict,
 )
 from .extractors.base import ToolExtractor
-from .extractors.builtins import ThinkToolExtractor, TodoExtractor, DisplayInlineExtractor
+from .extractors.builtins import (
+    DisplayInlineExtractor,
+    GenericToolExtractor,
+    ThinkToolExtractor,
+    TodoExtractor,
+)
 from .resume import create_resume_input, prepare_agent_input
 from .host import load_agent_spec, HostConfig, Workspace
 from .compat import (
@@ -85,6 +90,7 @@ __all__ = [
     "ThinkToolExtractor",
     "TodoExtractor",
     "DisplayInlineExtractor",
+    "GenericToolExtractor",
     # Resume utilities
     "create_resume_input",
     "prepare_agent_input",

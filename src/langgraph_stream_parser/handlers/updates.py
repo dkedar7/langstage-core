@@ -44,6 +44,7 @@ class UpdatesHandler:
         include_state_updates: bool,
         pending_tool_calls: dict[str, ToolCallStartEvent],
         suppress_content: bool = False,
+        default_extractor: ToolExtractor | None = None,
     ):
         """Initialize the handler.
 
@@ -56,8 +57,13 @@ class UpdatesHandler:
             suppress_content: If True, skip ContentEvent generation for
                 AI and human messages. Used in dual mode where the
                 messages handler provides token-level content instead.
+            default_extractor: Fallback extractor invoked when no entry
+                in ``extractors`` matches a tool's name. Lets hosts emit
+                a generic ``ToolExtractedEvent`` for custom tools the
+                parser doesn't know about.
         """
         self._extractors = extractors
+        self._default_extractor = default_extractor
         self._skip_tools = skip_tools
         self._track_tool_lifecycle = track_tool_lifecycle
         self._include_state_updates = include_state_updates
@@ -317,6 +323,13 @@ class UpdatesHandler:
         # Prefer artifact over content (artifact carries full data from
         # tools using response_format="content_and_artifact")
         extractor = self._extractors.get(tool_name) if tool_name else None
+        if extractor is None and tool_name and self._default_extractor is not None:
+            # No per-tool extractor matched. Fall through to the host's
+            # default extractor (e.g. GenericToolExtractor) so unknown
+            # tools still produce a ToolExtractedEvent. Opt-in via the
+            # `default_extractor` kwarg on StreamParser — None preserves
+            # the historical "only named extractors fire" behaviour.
+            extractor = self._default_extractor
         if extractor:
             try:
                 extracted = extractor.extract(artifact if artifact is not None else content)

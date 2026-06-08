@@ -8,6 +8,7 @@ from .base import ToolExtractor
 from .builtins import (
     CompressionExtractor,
     DisplayInlineExtractor,
+    GenericToolExtractor,
     MemoryExtractor,
     SkillManageExtractor,
     SkillViewExtractor,
@@ -16,12 +17,13 @@ from .builtins import (
 )
 
 __all__ = [
-    "ToolExtractor",
-    "ThinkToolExtractor",
-    "TodoExtractor",
+    "CompressionExtractor",
     "DisplayInlineExtractor",
+    "GenericToolExtractor",
+    "MemoryExtractor",
     "SkillManageExtractor",
     "SkillViewExtractor",
-    "CompressionExtractor",
-    "MemoryExtractor",
+    "ThinkToolExtractor",
+    "TodoExtractor",
+    "ToolExtractor",
 ]

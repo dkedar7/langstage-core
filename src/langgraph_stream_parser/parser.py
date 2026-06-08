@@ -165,6 +165,7 @@ class StreamParser:
         track_tool_lifecycle: bool = True,
         skip_tools: list[str] | None = None,
         include_state_updates: bool = False,
+        default_extractor: ToolExtractor | None = None,
     ):
         """Initialize the parser.
 
@@ -181,6 +182,17 @@ class StreamParser:
                 Useful for internal tools you don't want to expose in UI.
             include_state_updates: If True, emit StateUpdateEvent for non-message
                 state keys in updates mode.
+            default_extractor: Fallback extractor invoked for any tool name
+                that has no per-tool extractor registered. Without this,
+                custom tools only emit ``ToolCallStartEvent`` and
+                ``ToolCallEndEvent`` — never ``ToolExtractedEvent`` — so
+                hosts that switch on extracted events to render rich
+                cards have no signal to act on for unknown tools. Pass
+                :class:`~langgraph_stream_parser.GenericToolExtractor`
+                to surface every otherwise-unhandled tool as a generic
+                ``extracted_type="tool_call"`` event. Default ``None``
+                preserves the historical behaviour (only named
+                extractors fire).
 
         Raises:
             ValueError: If stream_mode is invalid.
@@ -192,6 +204,7 @@ class StreamParser:
         self._skip_tools = set(skip_tools or [])
         self._include_state_updates = include_state_updates
         self._extractors: dict[str, ToolExtractor] = {}
+        self._default_extractor = default_extractor
         self._pending_tool_calls: dict[str, ToolCallStartEvent] = {}
 
         # Register built-in extractors
@@ -401,6 +414,7 @@ class StreamParser:
         """Create an UpdatesHandler configured for this parser."""
         return UpdatesHandler(
             extractors=self._extractors,
+            default_extractor=self._default_extractor,
             skip_tools=self._skip_tools,
             track_tool_lifecycle=self._track_tool_lifecycle,
             include_state_updates=self._include_state_updates,
