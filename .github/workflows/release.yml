@@ -1,0 +1,32 @@
+name: Release
+
+# Mirrors the deepagent-hermes release.yml: tag-driven publish to PyPI.
+# Tag any commit with `v*` (e.g. `v0.2.1`) and this builds + uploads.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build
+        run: pip install build
+      - name: Build wheel + sdist
+        # `python -m build` (no flag) runs sdist → wheel-from-sdist,
+        # matching the publish path local pre-flight checks should
+        # exercise. See deepagent-hermes v0.1.2 incident for why this
+        # matters: a wheel built directly with --wheel can ship fine
+        # while the wheel-from-sdist drops every Python file because
+        # of a restrictive [tool.hatch.build.targets.sdist] include.
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
