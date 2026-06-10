@@ -6,6 +6,27 @@
 
 Universal parser for LangGraph streaming outputs. Normalizes complex, variable output shapes from `graph.stream()` and `graph.astream()` into consistent, typed event objects.
 
+## One agent, every surface
+
+`langgraph-stream-parser` is the shared core of the **deep-agent family**: write your agent once — any LangGraph `CompiledGraph` — and run it on every surface with the same spec string (`module:attr` or `path/to/file.py:attr`), the same `deepagents.toml` config file, and the same `DEEPAGENT_*` environment variables.
+
+| Surface | Package | Try it |
+|---|---|---|
+| Web app | [cowork-dash](https://github.com/dkedar7/cowork-dash) | `cowork-dash run --agent my_agent.py:graph` |
+| JupyterLab | [deepagent-lab](https://github.com/dkedar7/deepagent-lab) | `pip install deepagent-lab`, then the chat sidebar in `jupyter lab` |
+| Terminal | [deepagent-code](https://github.com/dkedar7/deepagent-code) | `deepagent-code -a my_agent.py:graph` |
+| VS Code | [deepagent-vscode](https://github.com/dkedar7/deepagent-vscode) | chat participant + stdio sidecar |
+| Reference agent | [deepagent-hermes](https://github.com/dkedar7/deepagent-hermes) | `DEEPAGENT_AGENT_SPEC=deepagent_hermes.agent:graph` on any surface |
+| Shared core | langgraph-stream-parser | **you are here** |
+
+No agent yet? Every surface has a keyless demo mode backed by this package's stub agent — no API key required:
+
+```bash
+export DEEPAGENT_AGENT_SPEC=langgraph_stream_parser.demo.stub:graph  # or each CLI's --demo flag
+```
+
+And the resolved configuration (each value, its source, and the env var / `deepagents.toml` key that sets it) is printable everywhere: `python -m langgraph_stream_parser.host`, or each CLI's `--show-config`.
+
 ## Installation
 
 ```bash
