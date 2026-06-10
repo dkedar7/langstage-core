@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-stream-parser"
-version = "0.2.1"
+version = "0.2.2"
 description = "Universal parser for LangGraph streaming outputs"
 readme = "README.md"
 license = {text = "MIT"}
