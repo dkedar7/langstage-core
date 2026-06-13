@@ -19,6 +19,8 @@ Universal parser for LangGraph streaming outputs. Normalizes complex, variable o
 | Reference agent | [langstage-hermes](https://github.com/dkedar7/langstage-hermes) | `LANGSTAGE_AGENT_SPEC=langstage_hermes.agent:graph` on any stage |
 | Shared core | langgraph-stream-parser | **you are here** |
 
+📖 **Full documentation:** <https://dkedar7.github.io/langstage-docs/>
+
 No agent yet? Every stage has a keyless demo mode backed by this package's stub agent — no API key required:
 
 ```bash
