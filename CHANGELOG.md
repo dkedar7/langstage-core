@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.5.0] - 2026-06-14
+
+An **async task-delegation engine** — the reusable core behind a "delegate a
+task, it runs in the background, track it on a board" surface. Single-process,
+dependency-free; surfaces provide a concrete store.
+
+### Added
+- **`langgraph_stream_parser.tasks`** — `TaskRunner` (an asyncio worker pool that
+  drives the shared `SessionAdapter`), a `TaskStore` protocol with a dependency-free
+  `InMemoryTaskStore` reference impl, the `Task` record + `TaskState` machine
+  (`queued → ongoing → review_needed → done/failed/cancelled`), and
+  `set_runner`/`get_runner` so agent tools can reach the runner.
+  `enqueue()` returns a `task_id` immediately (non-blocking); workers run each
+  task as its own session and transition it by the run's outcome; `cancel`,
+  `resume` (HITL), and `retry` round out the controls; orphaned `ongoing` tasks
+  are requeued on `start()`.
+- **`Session.outcome`** (+ `Session.interrupt` / `Session.error`) — a typed
+  terminal-outcome signal set by the session adapter
+  (`complete | interrupted | error | cancelled`). Headless consumers read this
+  instead of re-inspecting the event stream. Correctly distinguishes a HITL
+  pause from completion (the parser always emits a trailing `CompleteEvent`,
+  even after an interrupt).
+
+### Fixed
+- `__version__` was stale at `0.2.1` (pyproject was already ahead); now `0.5.0`.
+
+### Notes
+- Additive and dependency-free. The engine depends only on the `TaskStore`
+  protocol and the public `SessionAdapter` surface, so a surface can back it
+  with any store (in-memory, SQLite, …) and later graduate to a remote Agent
+  Protocol server without changing the engine.
+
 ## [0.4.1] - 2026-06-14
 
 AG-UI bridge robustness — an edge-case audit (`tests/test_agui_matrix.py`, run against purpose-built tool-calling / interrupting / erroring / checkpointer-less agents) surfaced three real issues, now fixed:

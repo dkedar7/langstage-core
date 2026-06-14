@@ -57,6 +57,16 @@ from .extractors.builtins import (
 )
 from .resume import create_resume_input, prepare_agent_input
 from .host import load_agent_spec, HostConfig, Workspace
+from .tasks import (
+    TaskRunner,
+    TaskStore,
+    InMemoryTaskStore,
+    Task,
+    TaskState,
+    set_runner,
+    get_runner,
+    outcome_to_state,
+)
 from .compat import (
     stream_graph_updates,
     astream_graph_updates,
@@ -64,7 +74,7 @@ from .compat import (
     aresume_graph_from_interrupt,
 )
 
-__version__ = "0.2.1"
+__version__ = "0.5.0"
 
 __all__ = [
     # Main parser
@@ -98,6 +108,15 @@ __all__ = [
     "load_agent_spec",
     "HostConfig",
     "Workspace",
+    # Task-delegation engine
+    "TaskRunner",
+    "TaskStore",
+    "InMemoryTaskStore",
+    "Task",
+    "TaskState",
+    "set_runner",
+    "get_runner",
+    "outcome_to_state",
     # Serialization
     "event_to_dict",
     # Legacy/compat functions

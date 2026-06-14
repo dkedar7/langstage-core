@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime
 from typing import Any, AsyncIterator
 
-from ..events import CompleteEvent, ErrorEvent, event_to_dict
+from ..events import CompleteEvent, ErrorEvent, InterruptEvent, event_to_dict
 from ..parser import StreamParser
 from ..resume import create_resume_input, prepare_agent_input
 
@@ -38,6 +38,19 @@ class Session:
         self.current_task: asyncio.Task | None = None
         self.sse_connected: bool = False
         self.created_at: datetime = datetime.now()
+        # Typed terminal outcome of the most recent turn, set by ``_produce``.
+        # One of ``"complete" | "interrupted" | "error" | "cancelled"``, or
+        # ``None`` before the first turn finishes. Headless consumers (e.g. a
+        # task runner) read this instead of re-inspecting the event stream to
+        # tell whether a turn finished, paused on a HITL interrupt, or failed.
+        self.outcome: str | None = None
+        # When ``outcome == "interrupted"``, the serialized InterruptEvent
+        # (``{"type": "interrupt", "action_requests": [...], ...}``) that paused
+        # the turn — everything a consumer needs to render a review gate and
+        # build resume decisions. ``None`` otherwise.
+        self.interrupt: dict[str, Any] | None = None
+        # When ``outcome in {"error"}``, a human-readable error string.
+        self.error: str | None = None
 
     def cancel_current(self) -> bool:
         """Cancel the in-flight turn if any. Returns True if one was cancelled."""
@@ -192,8 +205,18 @@ class SessionAdapter:
         return session
 
     async def _produce(self, session: Session, input_data: Any) -> None:
-        """Run one turn, pushing serialized events onto the session queue."""
+        """Run one turn, pushing serialized events onto the session queue.
+
+        Also records the turn's terminal outcome on the session
+        (``session.outcome`` + ``session.interrupt`` / ``session.error``) so
+        headless consumers don't have to re-inspect the event stream.
+        """
         parser = StreamParser(stream_mode=self._stream_mode, **self._parser_kwargs)
+        # Fresh turn → clear any prior outcome.
+        session.outcome = None
+        session.interrupt = None
+        session.error = None
+        pending_interrupt: dict[str, Any] | None = None
         try:
             stream = self._graph.astream(
                 input_data,
@@ -201,14 +224,33 @@ class SessionAdapter:
                 stream_mode=self._stream_mode,
             )
             async for event in parser.aparse(stream):
-                session.push(event_to_dict(event, max_result_len=self._max_result_len))
-                # Terminal events end the turn; the parser emits exactly one.
-                if isinstance(event, (CompleteEvent, ErrorEvent)):
+                data = event_to_dict(event, max_result_len=self._max_result_len)
+                session.push(data)
+                if isinstance(event, InterruptEvent):
+                    # The graph paused for HITL. The parser still emits a
+                    # trailing CompleteEvent when the stream ends, so remember
+                    # the interrupt and reinterpret that Complete below.
+                    pending_interrupt = data
+                elif isinstance(event, ErrorEvent):
+                    session.outcome = "error"
+                    session.error = event.error
+                    return
+                elif isinstance(event, CompleteEvent):
+                    # A Complete that follows an interrupt means "paused",
+                    # not "finished" — distinguish the two for consumers.
+                    if pending_interrupt is not None:
+                        session.outcome = "interrupted"
+                        session.interrupt = pending_interrupt
+                    else:
+                        session.outcome = "complete"
                     return
         except asyncio.CancelledError:
+            session.outcome = "cancelled"
             session.push({"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001 — surfaced to the client, not swallowed
+            session.outcome = "error"
+            session.error = f"{type(exc).__name__}: {exc}"
             session.push({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
 
     # ── Consuming (SSE) ──────────────────────────────────────────────
