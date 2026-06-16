@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.2] - 2026-06-16
+
+### Fixed
+- **Declare `langchain-core` as a dependency.** `langgraph_stream_parser.tasks.tools`
+  imports `langchain_core.tools` at module top level (reached by a plain
+  `import langgraph_stream_parser`), but the package declared `dependencies = []` — so a
+  bare `pip install langgraph-stream-parser` failed with `ModuleNotFoundError:
+  langchain_core`. Now a hard dependency. (Found by rolling the minimal-install CI guard
+  across the family; `langgraph` stays optional — its imports are lazy.)
+
+### CI
+- Added a `minimal-install` job (install with no extras + import smoke) to guard against
+  undeclared dependencies going forward.
+
 ## [0.6.1] - 2026-06-15
 
 ### Changed

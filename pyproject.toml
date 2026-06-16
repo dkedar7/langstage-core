@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-stream-parser"
-version = "0.6.1"
+version = "0.6.2"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,7 +29,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = []
+dependencies = [
+    # Base import chain imports `langchain_core.tools` at module top level
+    # (langgraph_stream_parser.tasks.tools). This must be a hard dependency so a
+    # bare `pip install langgraph-stream-parser` can `import langgraph_stream_parser`.
+    "langchain-core>=1.4",
+]
 
 [project.optional-dependencies]
 jupyter = [
