@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.3] - 2026-06-18
+
+### Fixed
+- `create_default_agent` now slugifies the agent `name` for the LLM message
+  `name` field, and its default name is space-free (`"Deep Agent"` -> `"deep-agent"`).
+  OpenAI-compatible providers (incl. OpenRouter) require that field to match
+  `^[^\s<|\/>]+$`, so an agent named with a space hit a cryptic `400` on the
+  second turn. Names with unsafe characters are now slugified with a warning, so
+  any human-readable name works. (Surfaced via langstage-jupyter #23, whose shipped
+  default `"Default Agent"` tripped it.)
+
 ## [0.6.2] - 2026-06-16
 
 ### Fixed

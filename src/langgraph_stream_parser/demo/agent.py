@@ -5,10 +5,32 @@ base ``langgraph-stream-parser`` install stays dependency-light — importing
 this module does not require the ``[demo]`` extra; only *calling* the factory
 does.
 """
+import re
+import warnings
 from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL = "anthropic:claude-sonnet-4-6"
+
+# OpenAI (and OpenAI-compatible providers, e.g. via OpenRouter) require the
+# message `name` field to match ^[^\s<|\\/>]+$ — no spaces or <|\/>. An agent's
+# display name flows into that field, so a name with a space 400s on the second
+# turn. Slugify unsafe names so any human-readable name "just works".
+_UNSAFE_AGENT_NAME = re.compile(r"[\s<|\\/>]+")
+
+
+def _safe_agent_name(name: str) -> str:
+    """Return a name safe for the LLM message `name` field (slugify spaces /
+    <|\\/>), warning if it had to change."""
+    safe = _UNSAFE_AGENT_NAME.sub("-", name).strip("-") or "agent"
+    if safe != name:
+        warnings.warn(
+            f"Agent name {name!r} contains characters not allowed in the LLM "
+            f"message 'name' field (spaces or <|\\/>); using {safe!r}. "
+            "OpenAI-compatible providers reject the original on multi-turn calls.",
+            stacklevel=3,
+        )
+    return safe
 
 DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant with access to a \
 filesystem workspace.
@@ -30,7 +52,7 @@ def create_default_agent(
     model: str | None = DEFAULT_MODEL,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     tools: list[Any] | None = None,
-    name: str = "Deep Agent",
+    name: str = "deep-agent",
     virtual_mode: bool = True,
     checkpointer: Any = None,
     **extra: Any,
@@ -89,7 +111,7 @@ def create_default_agent(
     backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=virtual_mode)
 
     kwargs: dict[str, Any] = dict(
-        name=name,
+        name=_safe_agent_name(name),
         system_prompt=system_prompt,
         backend=backend,
         tools=tools or [],

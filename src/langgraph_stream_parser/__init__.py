@@ -76,7 +76,7 @@ from .compat import (
     aresume_graph_from_interrupt,
 )
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 __all__ = [
     # Main parser
