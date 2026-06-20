@@ -45,6 +45,9 @@ class UpdatesHandler:
         pending_tool_calls: dict[str, ToolCallStartEvent],
         suppress_content: bool = False,
         default_extractor: ToolExtractor | None = None,
+        content_fallback: bool = False,
+        streamed_content_ids: set[str] | None = None,
+        streamed_content_nodes: set[str] | None = None,
     ):
         """Initialize the handler.
 
@@ -55,12 +58,25 @@ class UpdatesHandler:
             include_state_updates: Whether to emit StateUpdateEvents.
             pending_tool_calls: Shared dict tracking pending tool calls.
             suppress_content: If True, skip ContentEvent generation for
-                AI and human messages. Used in dual mode where the
-                messages handler provides token-level content instead.
+                AI and human messages entirely.
             default_extractor: Fallback extractor invoked when no entry
                 in ``extractors`` matches a tool's name. Lets hosts emit
                 a generic ``ToolExtractedEvent`` for custom tools the
                 parser doesn't know about.
+            content_fallback: Dual-mode flag. When True, a finished
+                AIMessage's text is emitted as a ContentEvent ONLY if the
+                messages (token) stream did not already stream it — keyed by
+                ``streamed_content_ids``/``streamed_content_nodes`` shared with
+                the MessagesHandler. This lets non-token-streaming nodes (a
+                node returning a prebuilt AIMessage, a rule-based/router agent)
+                still render content, without double-emitting streamed text.
+                Human messages stay suppressed (the messages stream never
+                echoes them). Mutually exclusive with ``suppress_content``.
+            streamed_content_ids: Shared set of message ids the messages
+                handler token-streamed (consulted when content_fallback).
+            streamed_content_nodes: Shared set of node names the messages
+                handler token-streamed (fallback dedup when a message has
+                no id).
         """
         self._extractors = extractors
         self._default_extractor = default_extractor
@@ -69,6 +85,13 @@ class UpdatesHandler:
         self._include_state_updates = include_state_updates
         self._pending_tool_calls = pending_tool_calls
         self._suppress_content = suppress_content
+        self._content_fallback = content_fallback
+        self._streamed_content_ids = (
+            streamed_content_ids if streamed_content_ids is not None else set()
+        )
+        self._streamed_content_nodes = (
+            streamed_content_nodes if streamed_content_nodes is not None else set()
+        )
 
     def process_chunk(self, chunk: Any) -> Iterator[StreamEvent]:
         """Process a single update chunk.
@@ -157,6 +180,21 @@ class UpdatesHandler:
             elif message_type == "HumanMessage":
                 yield from self._process_human_message(node_name, message)
 
+    def _already_streamed(self, node_name: str, message: Any) -> bool:
+        """Whether this message's content was already token-streamed (dual mode).
+
+        Only meaningful when ``content_fallback`` is set; single-updates mode
+        always returns False (emit everything). Keyed by message id when
+        available, else by node name as a conservative fallback so a streamed
+        message that happens to lack an id isn't duplicated.
+        """
+        if not self._content_fallback:
+            return False
+        msg_id = getattr(message, "id", None)
+        if msg_id is not None:
+            return msg_id in self._streamed_content_ids
+        return node_name in self._streamed_content_nodes
+
     def _process_ai_message(
         self, node_name: str, message: Any
     ) -> Iterator[StreamEvent]:
@@ -188,7 +226,10 @@ class UpdatesHandler:
                 self._pending_tool_calls[tc["id"]] = event
                 yield event
 
-        # Extract and yield content (unless suppressed for dual mode)
+        # Extract and yield content. In single-updates mode this always emits.
+        # In dual mode (content_fallback) it emits only for a finished AIMessage
+        # that the messages/token stream did NOT already deliver — so a
+        # non-token-streaming node still renders, with no duplicate text.
         if not self._suppress_content:
             content = extract_message_content(message)
             content = content.strip() if content else ""
@@ -197,8 +238,8 @@ class UpdatesHandler:
             if content and tool_calls:
                 content = clean_tool_dict_from_content(content)
 
-            # Yield content if non-empty
-            if content:
+            # Yield content if non-empty and not already token-streamed
+            if content and not self._already_streamed(node_name, message):
                 yield ContentEvent(
                     content=content,
                     role="assistant",
@@ -236,7 +277,9 @@ class UpdatesHandler:
         Yields:
             ContentEvent with role="human" (unless content is suppressed).
         """
-        if self._suppress_content:
+        # Suppressed in dual mode too: the messages/token stream never echoes
+        # the human turn, and surfaces already have the user's input.
+        if self._suppress_content or self._content_fallback:
             return
 
         content = extract_message_content(message)

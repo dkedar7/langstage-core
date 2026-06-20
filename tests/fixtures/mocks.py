@@ -31,7 +31,11 @@ AIMessage = _create_mock_class(
 AIMessageChunk = _create_mock_class(
     "AIMessageChunk",
     {"content": Any, "id": str, "tool_calls": list, "tool_call_chunks": list},
-    {"id": "chunk_123", "tool_calls": list, "tool_call_chunks": list}
+    # In a real LangGraph dual stream, the streamed AIMessageChunks and the
+    # final accumulated AIMessage for the same generation share one id. Default
+    # to the same id as AIMessage ("msg_123") so dual-mode dedup tests reflect
+    # reality (the updates fallback dedups against streamed content by id).
+    {"id": "msg_123", "tool_calls": list, "tool_call_chunks": list}
 )
 
 ToolMessage = _create_mock_class(

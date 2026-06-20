@@ -409,7 +409,12 @@ class StreamParser:
         ))
 
     def _create_updates_handler(
-        self, suppress_content: bool = False
+        self,
+        suppress_content: bool = False,
+        *,
+        content_fallback: bool = False,
+        streamed_content_ids: set[str] | None = None,
+        streamed_content_nodes: set[str] | None = None,
     ) -> UpdatesHandler:
         """Create an UpdatesHandler configured for this parser."""
         return UpdatesHandler(
@@ -420,6 +425,9 @@ class StreamParser:
             include_state_updates=self._include_state_updates,
             pending_tool_calls=self._pending_tool_calls,
             suppress_content=suppress_content,
+            content_fallback=content_fallback,
+            streamed_content_ids=streamed_content_ids,
+            streamed_content_nodes=streamed_content_nodes,
         )
 
     def _create_messages_handler(self) -> MessagesHandler:
@@ -453,8 +461,12 @@ class StreamParser:
         Handles both regular ``(mode, data)`` and subgraph
         ``(namespace, mode, data)`` chunk formats.
         """
-        updates_handler = self._create_updates_handler(suppress_content=True)
         messages_handler = self._create_messages_handler()
+        updates_handler = self._create_updates_handler(
+            content_fallback=True,
+            streamed_content_ids=messages_handler.streamed_content_ids,
+            streamed_content_nodes=messages_handler.streamed_content_nodes,
+        )
 
         for chunk in stream:
             if not _is_multi_mode(chunk):
@@ -477,8 +489,12 @@ class StreamParser:
         self, stream: AsyncIterator[Any]
     ) -> AsyncIterator[StreamEvent]:
         """Async version of _parse_multi_mode."""
-        updates_handler = self._create_updates_handler(suppress_content=True)
         messages_handler = self._create_messages_handler()
+        updates_handler = self._create_updates_handler(
+            content_fallback=True,
+            streamed_content_ids=messages_handler.streamed_content_ids,
+            streamed_content_nodes=messages_handler.streamed_content_nodes,
+        )
 
         async for chunk in stream:
             if not _is_multi_mode(chunk):
