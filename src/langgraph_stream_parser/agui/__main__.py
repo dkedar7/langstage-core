@@ -35,8 +35,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Serve the built-in keyless demo agent (no API key needed).",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")
-    parser.add_argument("--port", type=int, default=8000, help="Bind port (default 8000).")
+    # host/port default to None so the resolved HostConfig (env / langstage.toml /
+    # defaults) supplies them and --show-config matches the real bind; an explicit
+    # flag overrides. Previously these defaulted to 127.0.0.1:8000 in argparse
+    # while --show-config printed HostConfig's localhost:8050 — advertised values
+    # disagreed with what the server actually bound (gh #-dogfood).
+    parser.add_argument("--host", default=None, help="Bind host (default from host config).")
+    parser.add_argument("--port", type=int, default=None, help="Bind port (default from host config).")
     parser.add_argument("--path", default="/", help="Endpoint path (default '/').")
     parser.add_argument("--name", default=None, help="Agent display name for AG-UI clients.")
     parser.add_argument(
@@ -44,23 +49,45 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the resolved host config and exit.",
     )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the langgraph-stream-parser version and exit.",
+    )
     args = parser.parse_args(argv)
+
+    if args.version:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            print(f"langstage-agui (langgraph-stream-parser {version('langgraph-stream-parser')})")
+        except PackageNotFoundError:  # pragma: no cover
+            print("langstage-agui (langgraph-stream-parser 0.0.0+local)")
+        return 0
 
     from ..host import HostConfig
 
+    # CLI --host/--port are overrides on the resolved config so --show-config and
+    # the actual bind always agree (and env / langstage.toml host/port work).
+    host_port = {}
+    if args.host is not None:
+        host_port["host"] = args.host
+    if args.port is not None:
+        host_port["port"] = args.port
+
     if args.show_config:
-        print(HostConfig.resolve().describe())
+        print(HostConfig.resolve(overrides=host_port).describe())
         return 0
 
     if args.demo and args.agent:
         print("error: --demo and --agent are mutually exclusive", file=sys.stderr)
         return 2
 
-    if args.demo:
-        spec: str | None = DEMO_SPEC
-    else:
-        cfg = HostConfig.resolve(overrides={"agent_spec": args.agent})
-        spec = cfg.agent_spec
+    overrides = dict(host_port)
+    if not args.demo:
+        overrides["agent_spec"] = args.agent
+    cfg = HostConfig.resolve(overrides=overrides)
+    spec: str | None = DEMO_SPEC if args.demo else cfg.agent_spec
 
     if not spec:
         print(
@@ -73,8 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     from . import DEFAULT_AGENT_NAME, serve
 
     name = args.name or ("Demo Agent" if args.demo else DEFAULT_AGENT_NAME)
-    print(f"Serving {spec!r} over AG-UI at http://{args.host}:{args.port}{args.path}")
-    serve(spec, host=args.host, port=args.port, path=args.path, name=name)
+    # cfg.host/cfg.port are the resolved values --show-config prints, so the
+    # advertised config and the real bind agree.
+    print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
+    serve(spec, host=cfg.host, port=cfg.port, path=args.path, name=name)
     return 0
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.5] - 2026-06-20
+
+### Fixed
+- **`langstage-agui --show-config` disagreed with the real bind.** It printed
+  HostConfig's `localhost:8050` while the server bound argparse's
+  `127.0.0.1:8000`. host/port now come from the resolved HostConfig (so env /
+  `langstage.toml` host/port work), with `--host`/`--port` applied as overrides —
+  so `--show-config` reflects exactly what `serve()` binds. (Default bind is now
+  the host-config default, `localhost:8050`, instead of `127.0.0.1:8000`.)
+
+### Added
+- `langstage-agui --version` prints the package version (it had no version flag).
+
+### Docs
+- README: corrected the "Zero Dependencies" claim (`langchain-core` is a hard
+  runtime dep) and made the Quick Start runnable — it parses *your* compiled
+  graph (needs `langgraph`), with a keyless `create_stub_agent()` path via the
+  `[demo]` extra.
+
 ## [0.6.4] - 2026-06-20
 
 ### Fixed

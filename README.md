@@ -52,6 +52,19 @@ This is the family's blessed path to the broad AG-UI frontend ecosystem (Copilot
 pip install langgraph-stream-parser
 ```
 
+The core depends only on `langchain-core`. The Quick Start below parses *your*
+compiled LangGraph `graph`, so you'll also have `langgraph` (and your agent's
+deps) installed. To try it end to end with **no API key and no agent of your
+own**, install the demo extra for a bundled stub graph:
+
+```bash
+pip install "langgraph-stream-parser[demo]"
+```
+```python
+from langgraph_stream_parser.demo import create_stub_agent
+graph = create_stub_agent()   # a keyless echo agent you can stream
+```
+
 ## Quick Start
 
 ```python
@@ -79,7 +92,7 @@ for event in parser.parse(graph.stream(input_data, stream_mode="updates")):
 - **Interrupt Handling**: Parse and resume from human-in-the-loop interrupts
 - **Extensible Extractors**: Register custom extractors for domain-specific tools
 - **Async Support**: Both sync and async parsing via `parse()` and `aparse()`
-- **Zero Dependencies**: LangGraph/LangChain imported dynamically only when needed
+- **Dependency-light**: only `langchain-core` at runtime; LangGraph/LangChain (and the demo agent's deps) are imported dynamically only when needed
 - **Backward Compatible**: Legacy dict-based API available for gradual migration
 
 ## Event Types
