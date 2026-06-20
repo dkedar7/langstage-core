@@ -1,6 +1,6 @@
 [project]
 name = "langgraph-stream-parser"
-version = "0.6.3"
+version = "0.6.4"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}

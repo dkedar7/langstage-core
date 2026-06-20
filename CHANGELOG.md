@@ -1,6 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.4] - 2026-06-20
+
+### Fixed
+- **Dual-mode (`["updates","messages"]`) dropped content from non-token-streaming
+  nodes.** The updates handler hard-suppressed all content, so a `CompiledGraph`
+  whose node returns a finished `AIMessage` (rule-based / router / retrieval
+  agents, or any LLM call made outside a token-streaming node) produced **no
+  `ContentEvent` at all** — chat surfaces rendered a blank reply. The updates
+  handler now emits a finished message's content as a **fallback** when the
+  messages/token stream did not already deliver it, deduplicated by message id
+  (falling back to node name when a message has no id) so token-streamed content
+  is never doubled. Fixes blank replies in `langstage` (web) and
+  `langstage-vscode` for non-streaming agents.
 
 ### Changed
 - `__version__` is now derived from the installed distribution metadata

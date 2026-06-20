@@ -25,6 +25,15 @@ class MessagesHandler:
     provides complete tool calls in dual mode).
     """
 
+    def __init__(self) -> None:
+        # Track which messages actually token-streamed text content, so the
+        # dual-mode UpdatesHandler can emit a *fallback* ContentEvent for a
+        # finished AIMessage that never streamed (non-LLM / non-token-streaming
+        # nodes) without double-emitting one that did. Shared by reference with
+        # the updates handler in _parse_multi_mode.
+        self.streamed_content_ids: set[str] = set()
+        self.streamed_content_nodes: set[str] = set()
+
     def process_chunk(self, chunk: Any) -> Iterator[StreamEvent]:
         """Process a single messages-mode chunk.
 
@@ -99,6 +108,14 @@ class MessagesHandler:
         content = clean_tool_dict_from_content(content)
         if not content:
             return
+
+        # Record that this message (by id) and node token-streamed content, so
+        # the dual-mode updates handler knows not to re-emit it as a fallback.
+        msg_id = getattr(chunk, "id", None)
+        if msg_id:
+            self.streamed_content_ids.add(msg_id)
+        if node_name:
+            self.streamed_content_nodes.add(node_name)
 
         yield ContentEvent(
             content=content,

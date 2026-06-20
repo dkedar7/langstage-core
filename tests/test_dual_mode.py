@@ -254,14 +254,21 @@ class TestDualModeDeduplication:
         assert len(interrupt_events) == 1
         assert interrupt_events[0].needs_approval is True
 
-    def test_no_content_from_updates_in_dual_mode(self):
-        """Updates mode suppresses ContentEvent in dual mode."""
+    def test_unstreamed_updates_message_emits_fallback_content(self):
+        """A finished AIMessage that never token-streamed emits fallback content.
+
+        This is the dual-mode content fallback: when no messages/token stream
+        delivered the content (e.g. a node returning a prebuilt AIMessage), the
+        updates handler renders it instead of dropping it. Streamed content is
+        still deduped — see test_content_from_messages_only.
+        """
         parser = StreamParser(stream_mode=["updates", "messages"])
         chunks = [DUAL_UPDATES_SIMPLE]
         events = list(parser.parse(make_stream(chunks)))
 
         content_events = [e for e in events if isinstance(e, ContentEvent)]
-        assert len(content_events) == 0
+        assert len(content_events) == 1
+        assert content_events[0].content == "Hello, how can I help?"
 
 
 # ── Full interleaved conversation ────────────────────────────────────
@@ -484,14 +491,16 @@ class TestParseChunkDualMode:
 
 
 class TestSuppressContent:
-    def test_suppress_content_no_content_event(self):
-        """With suppress_content, updates handler emits no ContentEvent."""
+    def test_unstreamed_content_falls_back_to_updates(self):
+        """Dual mode renders a finished AIMessage's content when nothing
+        token-streamed it (the content fallback), rather than suppressing it."""
         parser = StreamParser(stream_mode=["updates", "messages"])
         chunks = [DUAL_UPDATES_SIMPLE]
         events = list(parser.parse(make_stream(chunks)))
 
         content_events = [e for e in events if isinstance(e, ContentEvent)]
-        assert len(content_events) == 0
+        assert len(content_events) == 1
+        assert content_events[0].content == "Hello, how can I help?"
 
     def test_suppress_content_tool_events_unaffected(self):
         """With suppress_content, tool events still come through."""
@@ -663,13 +672,15 @@ class TestSubgraphMultiMode:
         assert len(content_events) == 1
         assert content_events[0].content == "Sub token"
 
-    def test_child_updates_suppresses_content(self):
-        """In dual mode, updates from subgraph still suppress ContentEvent."""
+    def test_child_unstreamed_updates_emits_fallback_content(self):
+        """A subgraph updates message that never token-streamed still renders
+        (content fallback), with the namespace preserved."""
         parser = StreamParser(stream_mode=["updates", "messages"])
         events = list(parser.parse(make_stream([SUBGRAPH_MULTI_PARENT_UPD])))
 
         content_events = [e for e in events if isinstance(e, ContentEvent)]
-        assert len(content_events) == 0
+        assert len(content_events) == 1
+        assert content_events[0].content == "Hello, how can I help?"
 
     def test_child_tool_lifecycle(self):
         parser = StreamParser(stream_mode=["updates", "messages"])
