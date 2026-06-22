@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.9] - 2026-06-22
+
+### Changed
+- **Legacy `DEEPAGENT_*` env vars now emit a *visible* one-line deprecation
+  notice to stderr**, not just a `DeprecationWarning` (which Python's default
+  filter silently swallows, so CLI users never saw the nudge). Fires once per
+  variable, from the shared resolver — so every surface (web, CLI, JupyterLab,
+  VS Code, Hermes) gets it for free, no per-surface change. ASCII-only
+  (cp1252-safe); suppressed under pytest and via
+  `LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1`. (Found by the dogfood routine: the
+  canonical-vs-legacy contract advertised a warning the runtime never showed.)
+
 ## [0.6.8] - 2026-06-22
 
 ### Fixed

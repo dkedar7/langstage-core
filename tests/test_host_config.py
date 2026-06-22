@@ -138,6 +138,41 @@ class TestLangstageVocabulary:
         with pytest.warns(DeprecationWarning, match="LANGSTAGE_TITLE"):
             HostConfig.resolve(env={"DEEPAGENT_TITLE": "Old"}, toml_start=tmp_path)
 
+    def test_legacy_env_prints_visible_notice(self, isolated_global, tmp_path, monkeypatch, capsys):
+        # The DeprecationWarning is swallowed by Python's default filter, so the
+        # resolver ALSO prints a one-line notice to stderr for CLI users. Drop
+        # the pytest marker env so the notice isn't suppressed.
+        import langgraph_stream_parser.host.config as config_mod
+
+        config_mod._warned_legacy_env.discard("DEEPAGENT_PORT")
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE", raising=False)
+        HostConfig.resolve(env={"DEEPAGENT_PORT": "9000"}, toml_start=tmp_path)
+        err = capsys.readouterr().err
+        assert "DEEPAGENT_PORT is deprecated" in err
+        assert "LANGSTAGE_PORT" in err
+        # ASCII-only — must encode on a cp1252 Windows console.
+        err.encode("cp1252")
+
+    def test_legacy_env_notice_silent_under_pytest(self, isolated_global, tmp_path, capsys):
+        # PYTEST_CURRENT_TEST is set during this test, so no stderr notice fires
+        # (keeps test output clean and can't break captured-output assertions in
+        # the surface repos' suites).
+        import langgraph_stream_parser.host.config as config_mod
+
+        config_mod._warned_legacy_env.discard("DEEPAGENT_DEBUG")
+        HostConfig.resolve(env={"DEEPAGENT_DEBUG": "true"}, toml_start=tmp_path)
+        assert "deprecated" not in capsys.readouterr().err
+
+    def test_legacy_env_notice_suppressed_by_env(self, isolated_global, tmp_path, monkeypatch, capsys):
+        import langgraph_stream_parser.host.config as config_mod
+
+        config_mod._warned_legacy_env.discard("DEEPAGENT_HOST")
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE", "1")
+        HostConfig.resolve(env={"DEEPAGENT_HOST": "0.0.0.0"}, toml_start=tmp_path)
+        assert "deprecated" not in capsys.readouterr().err
+
     def test_langstage_toml_preferred_in_same_dir(self, isolated_global, tmp_path):
         (tmp_path / "deepagents.toml").write_text("[server]\nport = 1000\n")
         (tmp_path / "langstage.toml").write_text("[server]\nport = 2000\n")

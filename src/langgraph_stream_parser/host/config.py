@@ -14,7 +14,8 @@ Legacy vocabulary (the pre-LangStage names) still works everywhere as a
 deprecated fallback: ``DEEPAGENT_*`` env vars, project ``deepagents.toml``,
 global ``~/.deepagents/config.toml``, and ``DEEPAGENTS_CONFIG_HOME``. The
 canonical names win when both are set; using only the legacy env names emits
-a once-per-var ``DeprecationWarning``. Moving the global config out of
+a once-per-var ``DeprecationWarning`` *and* a visible one-line stderr notice
+(silence it with ``LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1``). Moving the global config out of
 ``~/.deepagents/`` also exits the schema collision with LangChain's dcode,
 which owns that directory now.
 
@@ -24,6 +25,7 @@ from, and the env var / TOML key that sets it — so you never have to remember
 the variable names.
 """
 import os
+import sys
 import warnings
 from dataclasses import MISSING, dataclass, fields, replace
 from pathlib import Path
@@ -70,6 +72,32 @@ def _warn_legacy_env(legacy: str, canonical: str) -> None:
         f"{legacy} is deprecated; use {canonical}.",
         DeprecationWarning,
         stacklevel=4,
+    )
+    _print_legacy_env_notice(legacy, canonical)
+
+
+def _print_legacy_env_notice(legacy: str, canonical: str) -> None:
+    """Print a one-line, user-visible deprecation notice to stderr.
+
+    The ``DeprecationWarning`` above is the correct signal for programmatic /
+    strict consumers, but Python's *default* warning filter silently swallows
+    it — so a real person running any LangStage CLI with a legacy
+    ``DEEPAGENT_*`` env var never sees the nudge. Printing here (once per var,
+    via the ``_warned_legacy_env`` dedupe in the caller) makes the deprecation
+    visible across every surface from the one place they all resolve config —
+    no per-surface code needed. ASCII-only so it can't crash a cp1252 Windows
+    console. Suppressed under pytest (keeps test output clean and can't break
+    other repos' suites) and via ``LANGSTAGE_SUPPRESS_LEGACY_NOTICE``.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    if _env_bool(os.getenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE")):
+        return
+    print(
+        f"note: {legacy} is deprecated; use {canonical}. "
+        "(Legacy DEEPAGENT_* support will be removed in a future release; "
+        "set LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1 to silence.)",
+        file=sys.stderr,
     )
 
 
