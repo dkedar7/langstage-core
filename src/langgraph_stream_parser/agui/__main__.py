@@ -76,7 +76,15 @@ def main(argv: list[str] | None = None) -> int:
         host_port["port"] = args.port
 
     if args.show_config:
-        print(HostConfig.resolve(overrides=host_port).describe())
+        # The AG-UI server consumes only agent_spec/host/port. Drop the inherited
+        # workspace_root/debug/title rows so --show-config doesn't advertise env
+        # vars that have no effect on this surface (same omit_keys treatment the
+        # stdio sidecar and JupyterLab launcher already use). (gh #39)
+        print(
+            HostConfig.resolve(overrides=host_port).describe(
+                omit_keys=["workspace_root", "debug", "title"]
+            )
+        )
         return 0
 
     if args.demo and args.agent:

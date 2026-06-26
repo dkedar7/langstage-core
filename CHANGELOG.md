@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.12] - 2026-06-26
+
+### Fixed
+- **`langstage-agui --show-config` advertised `workspace_root` / `debug` /
+  `title`, which the AG-UI server ignores.** The server consumes only
+  `agent_spec`, `host`, and `port`, but `--show-config` printed all six inherited
+  `HostConfig` rows with confident env-var sources — the exact inconsistency
+  0.6.11's `describe(omit_keys=…)` was added to fix for sibling surfaces, never
+  applied to the agui CLI. It now passes `omit_keys=["workspace_root", "debug",
+  "title"]`, matching the stdio sidecar and JupyterLab launcher. (gh #39)
+
 ## [0.6.11] - 2026-06-25
 
 ### Fixed
