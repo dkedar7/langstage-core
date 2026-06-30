@@ -18,11 +18,17 @@ import uuid
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
-from dotenv import load_dotenv
 
 from langgraph_stream_parser.adapters import FastAPIAdapter
 
-load_dotenv()
+# python-dotenv is optional — only needed if you load API keys from a .env (e.g.
+# when you swap in a model-backed agent). Don't make the example crash without it.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 from .agent import agent
 
