@@ -84,13 +84,31 @@ usable without dragging the web-server stack (see Open questions).
 
 ## Open questions / validation gates (must clear before step 4 lands)
 
+> **Status:** gate (1) cleared 2026-06-30 — cli-first migration is unblocked.
+> gate (2) still open and blocks the HITL surfaces (web, vscode).
+
 1. **Does `ag-ui-langgraph` expose an in-process event generator without the
-   FastAPI/uvicorn stack?** If consuming AG-UI events in-process forces the web
-   server deps into the terminal/Jupyter surfaces, that is a blocker — resolve by
-   either an upstream-supported encoder entry point or a minimal local adapter
-   over the same event types. **Gate:** prototype the CLI renderer against the
-   in-process encoder and confirm a base `pip install langstage-cli` gains no web
-   stack, before migrating any other surface.
+   FastAPI/uvicorn stack?** — **RESOLVED ✓ (2026-06-30, probe).**
+   `ag_ui_langgraph.LangGraphAgent.run(RunAgentInput)` is an `AsyncGenerator` of
+   AG-UI event objects (`TextMessage*`, `ToolCall*`, `State*`, `Reasoning*`, run/
+   step lifecycle) — consumed by iterating it in-process, no ASGI app. A probe
+   drove a keyless echo graph (text recovered from `MessagesSnapshotEvent`) and a
+   keyless **streaming** fake model (11× `TextMessageContentEvent` deltas
+   reconstructing the text), confirming the streaming terminal UX survives.
+   `uvicorn` is **never imported**; a base `ag-ui-langgraph` install pulls
+   `ag-ui-protocol` + `langgraph` and **no fastapi/uvicorn/starlette**.
+   - *One caveat, cheap:* `import ag_ui_langgraph` today eagerly imports its
+     FastAPI endpoint, so the top-level import currently forces `fastapi`+
+     `starlette` (still not `uvicorn`). The adapter modules (`agent`, `types`,
+     `utils`) are themselves fastapi-free — verified by guarding that import,
+     **uninstalling fastapi entirely**, and re-running the probe green.
+   - *Action:* land a one-line upstream lazy-import in `ag-ui-langgraph`'s
+     `__init__` (filed upstream: ag-ui-protocol/ag-ui#2067, with the patch +
+     evidence ready to PR). Until/unless it merges, the fallback is to accept
+     `fastapi`+`starlette` as transitive deps of
+     the in-process path — light (no `uvicorn`, no C extensions, `pydantic`
+     already present via langchain), far from "a web server in the terminal install."
+   - *Not covered by this probe:* interrupt/resume + usage parity — that's gate (2).
 2. **Interrupt/resume + usage parity.** ADR 0001 noted interrupt/resume as the
    capability the OpenAI spec couldn't represent and AG-UI can. Confirm the
    in-process path preserves it (and token-usage events) at full parity on the
@@ -100,4 +118,5 @@ usable without dragging the web-server stack (see Open questions).
 
 - Renaming the core package — bundled with the major that removes `events.py`, decided then.
 - Touching the host layer — it is the keeper; this ADR does not change it.
-- Migrating any surface before gate (1) clears.
+- Migrating the HITL surfaces (web, vscode) before gate (2) clears. (gate (1)
+  cleared, so cli-first may proceed.)
