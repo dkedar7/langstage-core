@@ -131,13 +131,23 @@ usable without dragging the web-server stack (see Open questions).
 - Renaming the core package — bundled with the major that removes `events.py`, decided then.
 - Touching the host layer — it is the keeper; this ADR does not change it.
 
-**Migration progress:** cli (0.5.17), jupyter (0.5.13), vscode (0.4.9) — **done**,
-each opt-in behind an `[agui]` extra with full text + tools + interrupts parity.
-**web** is the last surface. Both gates cleared; each surface migrated one PR at a
-time, gated on parity.
+**Migration progress: ALL FOUR SURFACES DONE** — cli (0.5.17), jupyter (0.5.13),
+vscode (0.4.9), web (langstage 0.12.3, on core 0.6.16). Each ships an opt-in
+`[agui]` path with full text + tools + interrupts parity (frame/chunk shape AND
+terminal outcome), default path untouched. Both gates cleared; each surface
+migrated one PR at a time, gated on parity.
 
-**Shared-mapping note:** cli + jupyter consume the same `stream_graph_updates`
-chunk-dict format, so their AG-UI→chunk mappings are byte-identical copies — the
-concrete dedupe target (hoist into this module). vscode is a *different* wire
-(`event_to_dict` frames) so it has its own mapping; web (SessionAdapter) will
-likely differ again. Consolidate per format-family, not one universal mapping.
+**Shared-mapping note (two format-families).**
+- *chunk-dict* (`stream_graph_updates` shape): **cli + jupyter** — byte-identical
+  copies in `langstage_cli.agui_stream` / `langstage_jupyter.agui_stream`.
+- *`event_to_dict` frames*: **vscode + web** — web uses the core's
+  `agui.iter_event_frames` (0.6.16); the vscode sidecar still has its own copy.
+
+**Remaining work (post-migration):**
+1. **Dedupe:** point the vscode sidecar at `agui.iter_event_frames` (delete its
+   copy); consider a core `agui` helper for the chunk-dict family (cli + jupyter).
+2. **Deprecate the event layer (Decision 3):** now that every first-party surface
+   has an AG-UI path, mark `StreamParser` / `events.py` / extractors deprecated,
+   then remove at the next major — *keeping* `extractors/` (hermes extends it).
+3. **Rename** the core to a `langstage-core`-style identity, bundled with that major.
+4. Flip each surface's default to AG-UI once the opt-in paths have soaked.
