@@ -35,6 +35,7 @@ __all__ = [
     "build_app",
     "serve",
     "ensure_available",
+    "iter_event_frames",
     "DEFAULT_AGENT_NAME",
 ]
 
@@ -221,3 +222,108 @@ def serve(
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(_IMPORT_HINT) from e
     uvicorn.run(app, host=host, port=port)
+
+
+async def iter_event_frames(
+    agent: Any,
+    message: str,
+    thread_id: str,
+    *,
+    resume: Any = None,
+    max_result_len: int = 500,
+):
+    """Drive an ``ag-ui-langgraph`` agent in-process and yield ``event_to_dict``-
+    shaped frames — the SAME wire vocabulary ``StreamParser`` + ``event_to_dict``
+    emit (``content`` / ``tool_start`` / ``tool_end`` / ``interrupt`` /
+    ``complete`` / ``error``), sourced from AG-UI events instead.
+
+    This is the retirement path for surfaces on the ``event_to_dict`` wire (the
+    vscode sidecar and the web ``SessionAdapter``): swap ``StreamParser`` for the
+    in-process AG-UI adapter without changing what the client renders.
+
+    ``agent`` is an already-built ``LangGraphAgent`` (see :func:`build_agent`).
+    ``resume`` (a decision answering an interrupt) rides
+    ``forwarded_props.command.resume`` -> LangGraph ``Command(resume=...)``.
+    """
+    try:
+        from ag_ui.core.types import RunAgentInput, UserMessage
+    except ImportError as e:  # pragma: no cover - only without the extra
+        raise RuntimeError(_IMPORT_HINT) from e
+    import json
+    import uuid
+
+    allowed_decisions = ["reject", "edit", "respond", "approve"]
+    forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
+    run_input = RunAgentInput(
+        thread_id=thread_id,
+        run_id=str(uuid.uuid4()),
+        state={},
+        messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
+        tools=[],
+        context=[],
+        forwarded_props=forwarded_props,
+    )
+
+    streamed_text = False
+    tool_args: dict[str, str] = {}
+    tool_names: dict[str, str] = {}
+
+    async for ev in agent.run(run_input):
+        t = type(ev).__name__
+        if t == "TextMessageContentEvent":
+            streamed_text = True
+            yield {"type": "content", "content": ev.delta, "role": "assistant", "node": "agent"}
+        elif t == "ToolCallStartEvent":
+            tool_names[ev.tool_call_id] = ev.tool_call_name
+            tool_args[ev.tool_call_id] = ""
+        elif t == "ToolCallArgsEvent":
+            tool_args[ev.tool_call_id] = tool_args.get(ev.tool_call_id, "") + ev.delta
+        elif t == "ToolCallEndEvent":
+            raw = tool_args.pop(ev.tool_call_id, "")
+            try:
+                args = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                args = {"_raw": raw}
+            yield {
+                "type": "tool_start",
+                "id": ev.tool_call_id,
+                "name": tool_names.get(ev.tool_call_id, "tool"),
+                "args": args,
+                "node": "agent",
+            }
+        elif t == "ToolCallResultEvent":
+            result = str(getattr(ev, "content", ""))
+            if len(result) > max_result_len:
+                result = result[:max_result_len] + "…(truncated)"
+            yield {
+                "type": "tool_end",
+                "id": ev.tool_call_id,
+                "name": tool_names.get(ev.tool_call_id, "tool"),
+                "result": result,
+                "status": "success",
+                "error_message": None,
+                "duration_ms": None,
+            }
+        elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
+            payload = getattr(ev, "value", None)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = {}
+            payload = payload or {}
+            yield {
+                "type": "interrupt",
+                "action_requests": payload.get("action_requests", []),
+                "review_configs": payload.get("review_configs", []),
+                "allowed_decisions": payload.get("allowed_decisions", allowed_decisions),
+            }
+        elif t == "MessagesSnapshotEvent" and not streamed_text:
+            for m in ev.messages:
+                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None):
+                    yield {"type": "content", "content": m.content, "role": "assistant", "node": "agent"}
+        elif t == "RunErrorEvent":
+            yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
+            return
+
+    yield {"type": "complete"}

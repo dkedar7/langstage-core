@@ -102,6 +102,7 @@ class SessionAdapter:
         graph: Any,
         stream_mode: str | list[str] = ("updates", "messages"),
         max_result_len: int = 500,
+        agui: bool = False,
         **parser_kwargs: Any,
     ):
         self._graph = graph
@@ -110,6 +111,12 @@ class SessionAdapter:
         self._max_result_len = max_result_len
         self._parser_kwargs = parser_kwargs
         self._sessions: dict[str, Session] = {}
+        # Experimental (ADR 0002): when set, turns stream through the in-process
+        # AG-UI adapter (``agui.iter_event_frames``) instead of StreamParser,
+        # emitting the SAME ``event_to_dict`` frames. The wrapped agent is built
+        # lazily and reused (its checkpointer keys per-session by thread_id).
+        self._agui = agui
+        self._agui_agent: Any = None
 
     # ── Session lifecycle ────────────────────────────────────────────
 
@@ -170,6 +177,13 @@ class SessionAdapter:
         """
         session = self.get_or_create(session_id)
         session.cancel_current()
+        if self._agui:
+            # Reuse prepare_agent_input's context-combining, then hand the raw
+            # text to the AG-UI producer (which builds its own RunAgentInput).
+            combined = prepare_agent_input(message=content, context_parts=context_parts)
+            text = combined["messages"][0]["content"]
+            session.current_task = asyncio.create_task(self._produce_agui(session, message=text))
+            return session
         input_data = prepare_agent_input(message=content, context_parts=context_parts)
         session.current_task = asyncio.create_task(self._produce(session, input_data))
         return session
@@ -182,6 +196,11 @@ class SessionAdapter:
         """Resume a session from an interrupt with HITL decisions."""
         session = self.get_or_create(session_id)
         session.cancel_current()
+        if self._agui:
+            session.current_task = asyncio.create_task(
+                self._produce_agui(session, resume={"decisions": decisions})
+            )
+            return session
         input_data = create_resume_input(decisions=decisions)
         session.current_task = asyncio.create_task(self._produce(session, input_data))
         return session
@@ -238,6 +257,60 @@ class SessionAdapter:
                 elif isinstance(event, CompleteEvent):
                     # A Complete that follows an interrupt means "paused",
                     # not "finished" — distinguish the two for consumers.
+                    if pending_interrupt is not None:
+                        session.outcome = "interrupted"
+                        session.interrupt = pending_interrupt
+                    else:
+                        session.outcome = "complete"
+                    return
+        except asyncio.CancelledError:
+            session.outcome = "cancelled"
+            session.push({"type": "cancelled"})
+            raise
+        except Exception as exc:  # noqa: BLE001 — surfaced to the client, not swallowed
+            session.outcome = "error"
+            session.error = f"{type(exc).__name__}: {exc}"
+            session.push({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
+
+    async def _produce_agui(
+        self,
+        session: Session,
+        *,
+        message: str = "",
+        resume: Any = None,
+    ) -> None:
+        """AG-UI variant of :meth:`_produce` (experimental, ADR 0002).
+
+        Sources the same ``event_to_dict`` frames from the in-process AG-UI
+        adapter instead of StreamParser, and records the identical terminal
+        outcome so headless consumers (the task runner) behave unchanged.
+        """
+        from ..agui import build_agent, iter_event_frames
+
+        session.outcome = None
+        session.interrupt = None
+        session.error = None
+        pending_interrupt: dict[str, Any] | None = None
+        if self._agui_agent is None:
+            self._agui_agent = build_agent(self._graph)
+        thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
+        try:
+            async for data in iter_event_frames(
+                self._agui_agent,
+                message,
+                thread_id,
+                resume=resume,
+                max_result_len=self._max_result_len,
+            ):
+                session.push(data)
+                kind = data.get("type")
+                if kind == "interrupt":
+                    pending_interrupt = data
+                elif kind == "error":
+                    session.outcome = "error"
+                    session.error = data.get("error")
+                    return
+                elif kind == "complete":
                     if pending_interrupt is not None:
                         session.outcome = "interrupted"
                         session.interrupt = pending_interrupt
