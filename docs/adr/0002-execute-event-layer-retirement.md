@@ -131,6 +131,13 @@ usable without dragging the web-server stack (see Open questions).
 - Renaming the core package — bundled with the major that removes `events.py`, decided then.
 - Touching the host layer — it is the keeper; this ADR does not change it.
 
-**Migration progress:** cli — **done** (0.5.17, text + tools + interrupts). Next by
-the cheapest-first sequence: jupyter, then vscode, then web. Both gates cleared, so
-no surface is gate-blocked; each still migrates one PR at a time, gated on parity.
+**Migration progress:** cli (0.5.17), jupyter (0.5.13), vscode (0.4.9) — **done**,
+each opt-in behind an `[agui]` extra with full text + tools + interrupts parity.
+**web** is the last surface. Both gates cleared; each surface migrated one PR at a
+time, gated on parity.
+
+**Shared-mapping note:** cli + jupyter consume the same `stream_graph_updates`
+chunk-dict format, so their AG-UI→chunk mappings are byte-identical copies — the
+concrete dedupe target (hoist into this module). vscode is a *different* wire
+(`event_to_dict` frames) so it has its own mapping; web (SessionAdapter) will
+likely differ again. Consolidate per format-family, not one universal mapping.
