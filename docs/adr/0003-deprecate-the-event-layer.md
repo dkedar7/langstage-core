@@ -1,6 +1,6 @@
 # ADR 0003 — Deprecate and retire the event layer
 
-**Status:** Accepted — 2026-07-01
+**Status:** Implemented — 2026-07-02 (Accepted 2026-07-01)
 **Decision owner:** Kedar Dabhadkar
 **Builds on:** [ADR 0001](0001-adopt-ag-ui-for-the-wire.md), [ADR 0002](0002-execute-event-layer-retirement.md)
 
@@ -130,3 +130,31 @@ regresses and no warning fires on a default path.
 - Any `DeprecationWarning` on `StreamParser` / `events` — premature until Stage 4.
 - The rename — bundled with the Stage 5 major.
 - Removing `prepare_agent_input` or `SessionAdapter` — both are keepers.
+
+## Outcome — 2026-07-02 (Implemented)
+
+The full arc shipped. The event layer is gone and AG-UI is the sole streaming
+path on every surface. There is no `--no-agui` escape hatch: rather than a
+default-flip-then-soak, the event layer was removed outright at the core major and
+each surface repointed to the AG-UI-only adapter in one release.
+
+- **Core:** `langgraph-stream-parser` renamed to **`langstage-core` 1.0.0**.
+  Removed `StreamParser`, `events.py`, `event_to_dict`, `compat.py`, `handlers/`,
+  and the message/interrupt extractors; the `SessionAdapter` is now AG-UI-only.
+  **Kept:** `prepare_agent_input`, `create_resume_input`, `host/`, `tasks/`,
+  `extractors/` (base + builtins, event-layer-free), and the two shared mappings
+  `agui.iter_event_frames` / `agui.iter_chunk_frames`. A final
+  `langgraph-stream-parser 1.0.0` compat shim re-exports `langstage_core` under
+  the old import name with a `DeprecationWarning`.
+- **Surfaces (all AG-UI-only, repointed to `langstage-core[agui]` in base deps):**
+  langstage-cli **0.6.1**, langstage-hermes **0.4.1**, langstage-vscode **0.5.0**,
+  langstage-jupyter **0.6.0**, langstage (web) **0.13.0**.
+- **Open questions, resolved:** (1) extractor→AG-UI fidelity — shipped (hermes'
+  four extractors are wired via the `extractors=` bridge). (2) escape-hatch
+  lifetime — moot; no escape hatch shipped (clean removal at the major). (3)
+  usage-event parity — the surfaces that display cost run on the AG-UI paths.
+- **One regression caught + fixed during rollout:** the Jupyter React frontend
+  rendered AG-UI **token deltas** as fragmented grey per-token "intermediates"
+  (it was built for the old cumulative per-message chunks). Fixed by accumulating
+  same-node deltas into one message (langstage-jupyter 0.6.0). The other frontends
+  were already delta-native.
