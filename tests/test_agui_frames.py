@@ -35,3 +35,57 @@ async def test_iter_event_frames_shape():
     content = [f for f in frames if f.get("type") == "content"]
     assert content and all(set(f) == {"type", "content", "role", "node"} for f in content)
     assert "event wire" in "".join(f["content"] for f in content)
+
+
+async def test_iter_event_frames_runs_extractors():
+    """extractors= runs a matching extractor over each tool result and emits an
+    `extraction` frame (ADR 0003 Stage 1, productionized)."""
+    from typing import Iterator, List
+
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.prebuilt import create_react_agent
+
+    @tool
+    def note(text: str) -> str:
+        """Write a note."""
+        return '{"saved": true}'
+
+    class M(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "m"
+
+        def bind_tools(self, tools, **k):
+            return self
+
+        def _stream(self, messages: List[BaseMessage], stop=None, run_manager=None, **k) -> Iterator[ChatGenerationChunk]:
+            if any(isinstance(m, ToolMessage) for m in messages):
+                yield ChatGenerationChunk(message=AIMessageChunk(content="ok"))
+            else:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[
+                    {"name": "note", "args": '{"text": "hi"}', "id": "c1", "index": 0}]))
+
+        def _generate(self, messages, stop=None, run_manager=None, **k) -> ChatResult:
+            cs = list(self._stream(messages)); msg = cs[0].message
+            for c in cs[1:]:
+                msg = msg + c.message
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(
+                content=msg.content, tool_calls=getattr(msg, "tool_calls", [])))])
+
+    class NoteExtractor:
+        tool_name = "note"
+        extracted_type = "note_saved"
+
+        def extract(self, content):
+            import json
+            d = json.loads(content) if isinstance(content, str) else content
+            return {"ok": bool(d.get("saved"))} if isinstance(d, dict) else None
+
+    agent = build_agent(create_react_agent(M(), [note]))
+    frames = await _collect(iter_event_frames(agent, "note hi", "tE", extractors=[NoteExtractor()]))
+    extraction = [f for f in frames if f["type"] == "extraction"]
+    assert extraction and extraction[0]["extracted_type"] == "note_saved"
+    assert extraction[0]["data"] == {"ok": True}
