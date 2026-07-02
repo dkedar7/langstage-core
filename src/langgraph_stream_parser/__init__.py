@@ -1,122 +1,76 @@
-"""
-langgraph-stream-parser: Universal parser for LangGraph streaming outputs.
+"""langstage-core — the host + AG-UI bridge for the LangStage agent family.
 
-This package provides a typed interface for parsing streaming outputs from
-LangGraph agents, normalizing the complex output shapes into consistent,
-typed event objects.
+Since 1.0 (ADR 0003) the bespoke event-translation layer (``StreamParser``, the
+``events`` dataclasses, ``event_to_dict``, the render adapters, and the
+``stream_graph_updates`` helpers) is gone: surfaces stream through the in-process
+AG-UI adapter instead. What remains is the *durable* core —
 
-Basic Usage:
-    from langgraph_stream_parser import StreamParser
-    from langgraph_stream_parser.events import ContentEvent, InterruptEvent
+  - **host**: ``load_agent_spec`` + ``HostConfig`` + ``Workspace`` (write once,
+    run on every surface with the same spec string and ``langstage.toml`` config).
+  - **agui**: ``build_agent`` + ``iter_event_frames`` / ``iter_chunk_frames``
+    (the in-process AG-UI stream, with an ``extractors=`` hook), ``build_app`` /
+    ``serve`` for the wire, and ``SessionAdapter`` for session-scoped streaming.
+  - **tasks**: the durable task-delegation engine.
+  - **extractors**: the ``ToolExtractor`` protocol + reusable built-ins.
 
-    parser = StreamParser()
+Quick start::
 
-    for event in parser.parse(graph.stream(input, stream_mode="updates")):
-        match event:
-            case ContentEvent(content=text):
-                print(text, end="")
-            case InterruptEvent(action_requests=actions):
-                # Handle human-in-the-loop
-                ...
-
-Legacy Dict-Based API:
-    from langgraph_stream_parser import stream_graph_updates
-
-    for update in stream_graph_updates(agent, input_data, config=config):
-        if "chunk" in update:
-            print(update["chunk"], end="")
-        elif update.get("status") == "interrupt":
-            # Handle interrupt
-            ...
+    from langgraph_stream_parser.agui import build_agent, iter_event_frames
+    agent = build_agent(my_compiled_graph)
+    async for frame in iter_event_frames(agent, "hello", "session-1"):
+        ...   # {"type": "content" | "tool_start" | "interrupt" | ...}
 """
 from importlib.metadata import PackageNotFoundError, version
 
-from .parser import StreamParser
-from .events import (
-    ContentEvent,
-    ReasoningEvent,
-    ToolCallStartEvent,
-    ToolCallEndEvent,
-    ToolExtractedEvent,
-    DisplayEvent,
-    InterruptEvent,
-    StateUpdateEvent,
-    UsageEvent,
-    CustomEvent,
-    ValuesEvent,
-    DebugEvent,
-    CompleteEvent,
-    ErrorEvent,
-    StreamEvent,
-    event_to_dict,
-)
-from .extractors.base import ToolExtractor
-from .extractors.builtins import (
+from .extractors import (
+    CompressionExtractor,
     DisplayInlineExtractor,
     GenericToolExtractor,
+    MemoryExtractor,
+    SkillManageExtractor,
+    SkillViewExtractor,
     ThinkToolExtractor,
     TodoExtractor,
+    ToolExtractor,
 )
+from .host import HostConfig, Workspace, load_agent_spec
 from .resume import create_resume_input, prepare_agent_input
-from .host import load_agent_spec, HostConfig, Workspace
 from .tasks import (
-    TaskRunner,
-    TaskStore,
     InMemoryTaskStore,
-    Task,
-    TaskState,
     TASK_TOOLS,
-    set_runner,
-    get_runner,
+    Task,
+    TaskRunner,
+    TaskState,
+    TaskStore,
     current_task_id,
+    get_runner,
     outcome_to_state,
-)
-from .compat import (
-    stream_graph_updates,
-    astream_graph_updates,
-    resume_graph_from_interrupt,
-    aresume_graph_from_interrupt,
+    set_runner,
 )
 
-# Single source of truth is the installed distribution metadata (driven by
-# pyproject's version), so a hard-coded constant can never drift out of sync.
 try:
     __version__ = version("langgraph-stream-parser")
 except PackageNotFoundError:  # pragma: no cover - editable/source checkout
     __version__ = "0.0.0+local"
 
 __all__ = [
-    # Main parser
-    "StreamParser",
-    # Event types
-    "ContentEvent",
-    "ReasoningEvent",
-    "ToolCallStartEvent",
-    "ToolCallEndEvent",
-    "ToolExtractedEvent",
-    "DisplayEvent",
-    "InterruptEvent",
-    "StateUpdateEvent",
-    "UsageEvent",
-    "CustomEvent",
-    "ValuesEvent",
-    "DebugEvent",
-    "CompleteEvent",
-    "ErrorEvent",
-    "StreamEvent",
-    # Extractors
+    # Host conventions
+    "load_agent_spec",
+    "HostConfig",
+    "Workspace",
+    # Input helpers
+    "prepare_agent_input",
+    "create_resume_input",
+    # Extractors (ToolExtractor protocol + reusable built-ins)
     "ToolExtractor",
     "ThinkToolExtractor",
     "TodoExtractor",
     "DisplayInlineExtractor",
     "GenericToolExtractor",
-    # Resume utilities
-    "create_resume_input",
-    "prepare_agent_input",
-    # Host conventions
-    "load_agent_spec",
-    "HostConfig",
-    "Workspace",
+    "SkillManageExtractor",
+    "SkillViewExtractor",
+    "MemoryExtractor",
+    "CompressionExtractor",
     # Task-delegation engine
     "TaskRunner",
     "TaskStore",
@@ -128,11 +82,4 @@ __all__ = [
     "get_runner",
     "current_task_id",
     "outcome_to_state",
-    # Serialization
-    "event_to_dict",
-    # Legacy/compat functions
-    "stream_graph_updates",
-    "astream_graph_updates",
-    "resume_graph_from_interrupt",
-    "aresume_graph_from_interrupt",
 ]

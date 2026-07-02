@@ -913,7 +913,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-stream-parser"
-version = "0.6.15"
+version = "0.6.19"
 source = { editable = "." }
 dependencies = [
     { name = "langchain-core" },

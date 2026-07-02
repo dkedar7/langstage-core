@@ -1,18 +1,10 @@
-"""Adapters for rendering LangGraph stream events in different environments."""
+"""Session adapter for driving a LangGraph agent over the in-process AG-UI stream.
 
-from .base import BaseAdapter, ToolStatus, ToolState
-from .print import PrintAdapter
-from .cli import CLIAdapter
-from .fastapi import FastAPIAdapter
-from .session import SessionAdapter, Session
+The bespoke render adapters (CLI/FastAPI/Jupyter/Print) and the ``StreamParser``
+they wrapped were removed in langstage-core 1.0; ``SessionAdapter`` is now
+AG-UI-only (see ADR 0003).
+"""
 
-__all__ = [
-    "BaseAdapter",
-    "ToolStatus",
-    "ToolState",
-    "PrintAdapter",
-    "CLIAdapter",
-    "FastAPIAdapter",
-    "SessionAdapter",
-    "Session",
-]
+from .session import Session, SessionAdapter
+
+__all__ = ["SessionAdapter", "Session"]

@@ -23,9 +23,7 @@ import uuid
 from datetime import datetime
 from typing import Any, AsyncIterator
 
-from ..events import CompleteEvent, ErrorEvent, InterruptEvent, event_to_dict
-from ..parser import StreamParser
-from ..resume import create_resume_input, prepare_agent_input
+from ..resume import prepare_agent_input
 
 
 class Session:
@@ -100,22 +98,15 @@ class SessionAdapter:
         self,
         *,
         graph: Any,
-        stream_mode: str | list[str] = ("updates", "messages"),
         max_result_len: int = 500,
-        agui: bool = False,
-        **parser_kwargs: Any,
+        **_legacy: Any,  # accepts + ignores the removed stream_mode/agui/parser kwargs
     ):
         self._graph = graph
-        # Normalize tuple default to a list (StreamParser expects str | list).
-        self._stream_mode = list(stream_mode) if isinstance(stream_mode, tuple) else stream_mode
         self._max_result_len = max_result_len
-        self._parser_kwargs = parser_kwargs
         self._sessions: dict[str, Session] = {}
-        # Experimental (ADR 0002): when set, turns stream through the in-process
-        # AG-UI adapter (``agui.iter_event_frames``) instead of StreamParser,
-        # emitting the SAME ``event_to_dict`` frames. The wrapped agent is built
-        # lazily and reused (its checkpointer keys per-session by thread_id).
-        self._agui = agui
+        # AG-UI-only since langstage-core 1.0 (ADR 0003): turns stream through the
+        # in-process AG-UI adapter (``agui.iter_event_frames``) — the wrapped agent
+        # is built lazily and reused (its checkpointer keys per-session by thread_id).
         self._agui_agent: Any = None
 
     # ── Session lifecycle ────────────────────────────────────────────
@@ -177,15 +168,11 @@ class SessionAdapter:
         """
         session = self.get_or_create(session_id)
         session.cancel_current()
-        if self._agui:
-            # Reuse prepare_agent_input's context-combining, then hand the raw
-            # text to the AG-UI producer (which builds its own RunAgentInput).
-            combined = prepare_agent_input(message=content, context_parts=context_parts)
-            text = combined["messages"][0]["content"]
-            session.current_task = asyncio.create_task(self._produce_agui(session, message=text))
-            return session
-        input_data = prepare_agent_input(message=content, context_parts=context_parts)
-        session.current_task = asyncio.create_task(self._produce(session, input_data))
+        # Reuse prepare_agent_input's context-combining, then hand the raw text to
+        # the AG-UI producer (which builds its own RunAgentInput).
+        combined = prepare_agent_input(message=content, context_parts=context_parts)
+        text = combined["messages"][0]["content"]
+        session.current_task = asyncio.create_task(self._produce(session, message=text))
         return session
 
     def submit_decisions(
@@ -196,13 +183,9 @@ class SessionAdapter:
         """Resume a session from an interrupt with HITL decisions."""
         session = self.get_or_create(session_id)
         session.cancel_current()
-        if self._agui:
-            session.current_task = asyncio.create_task(
-                self._produce_agui(session, resume={"decisions": decisions})
-            )
-            return session
-        input_data = create_resume_input(decisions=decisions)
-        session.current_task = asyncio.create_task(self._produce(session, input_data))
+        session.current_task = asyncio.create_task(
+            self._produce(session, resume={"decisions": decisions})
+        )
         return session
 
     def cancel(self, session_id: str) -> bool:
@@ -223,67 +206,17 @@ class SessionAdapter:
         session.push(event)
         return session
 
-    async def _produce(self, session: Session, input_data: Any) -> None:
-        """Run one turn, pushing serialized events onto the session queue.
-
-        Also records the turn's terminal outcome on the session
-        (``session.outcome`` + ``session.interrupt`` / ``session.error``) so
-        headless consumers don't have to re-inspect the event stream.
-        """
-        parser = StreamParser(stream_mode=self._stream_mode, **self._parser_kwargs)
-        # Fresh turn → clear any prior outcome.
-        session.outcome = None
-        session.interrupt = None
-        session.error = None
-        pending_interrupt: dict[str, Any] | None = None
-        try:
-            stream = self._graph.astream(
-                input_data,
-                config=session.config,
-                stream_mode=self._stream_mode,
-            )
-            async for event in parser.aparse(stream):
-                data = event_to_dict(event, max_result_len=self._max_result_len)
-                session.push(data)
-                if isinstance(event, InterruptEvent):
-                    # The graph paused for HITL. The parser still emits a
-                    # trailing CompleteEvent when the stream ends, so remember
-                    # the interrupt and reinterpret that Complete below.
-                    pending_interrupt = data
-                elif isinstance(event, ErrorEvent):
-                    session.outcome = "error"
-                    session.error = event.error
-                    return
-                elif isinstance(event, CompleteEvent):
-                    # A Complete that follows an interrupt means "paused",
-                    # not "finished" — distinguish the two for consumers.
-                    if pending_interrupt is not None:
-                        session.outcome = "interrupted"
-                        session.interrupt = pending_interrupt
-                    else:
-                        session.outcome = "complete"
-                    return
-        except asyncio.CancelledError:
-            session.outcome = "cancelled"
-            session.push({"type": "cancelled"})
-            raise
-        except Exception as exc:  # noqa: BLE001 — surfaced to the client, not swallowed
-            session.outcome = "error"
-            session.error = f"{type(exc).__name__}: {exc}"
-            session.push({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
-
-    async def _produce_agui(
+    async def _produce(
         self,
         session: Session,
         *,
         message: str = "",
         resume: Any = None,
     ) -> None:
-        """AG-UI variant of :meth:`_produce` (experimental, ADR 0002).
-
-        Sources the same ``event_to_dict`` frames from the in-process AG-UI
-        adapter instead of StreamParser, and records the identical terminal
-        outcome so headless consumers (the task runner) behave unchanged.
+        """Run one turn through the in-process AG-UI adapter, pushing serialized
+        ``event_to_dict`` frames onto the session queue and recording the terminal
+        outcome (``session.outcome`` + ``session.interrupt`` / ``session.error``) so
+        headless consumers (the task runner) don't re-inspect the event stream.
         """
         from ..agui import build_agent, iter_event_frames
 
