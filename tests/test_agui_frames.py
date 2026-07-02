@@ -89,3 +89,26 @@ async def test_iter_event_frames_runs_extractors():
     extraction = [f for f in frames if f["type"] == "extraction"]
     assert extraction and extraction[0]["extracted_type"] == "note_saved"
     assert extraction[0]["data"] == {"ok": True}
+
+
+async def test_iter_event_frames_state_passthrough():
+    """state= seeds the graph input so agents with a richer contract than
+    `messages` (e.g. hermes' iteration_budget) get their extra keys."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, StateGraph
+    from typing import Any as _Any
+    from typing_extensions import TypedDict
+
+    class S(TypedDict):
+        messages: _Any
+        budget: int
+
+    def node(st):
+        return {"messages": [AIMessage(content=f"budget={st.get('budget')}")]}
+
+    b = StateGraph(S); b.add_node("n", node); b.add_edge(START, "n"); b.add_edge("n", END)
+    agent = build_agent(b.compile(checkpointer=InMemorySaver()))
+    frames = await _collect(iter_event_frames(agent, "hi", "tS", state={"budget": 7}))
+    text = "".join(f["content"] for f in frames if f.get("type") == "content")
+    assert "budget=7" in text, frames

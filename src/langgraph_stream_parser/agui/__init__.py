@@ -233,6 +233,7 @@ async def iter_event_frames(
     resume: Any = None,
     max_result_len: int = 500,
     extractors: Any = (),
+    state: Any = None,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``event_to_dict``-
     shaped frames — the SAME wire vocabulary ``StreamParser`` + ``event_to_dict``
@@ -266,7 +267,7 @@ async def iter_event_frames(
     run_input = RunAgentInput(
         thread_id=thread_id,
         run_id=str(uuid.uuid4()),
-        state={},
+        state=dict(state or {}),
         messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
         tools=[],
         context=[],
@@ -355,6 +356,7 @@ async def iter_chunk_frames(
     thread_id: str,
     *,
     resume: Any = None,
+    state: Any = None,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``stream_graph_updates``
     chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result": ...}``,
@@ -362,7 +364,8 @@ async def iter_chunk_frames(
 
     The chunk-dict counterpart of :func:`iter_event_frames`: the retirement path
     for surfaces on the ``stream_graph_updates`` wire (the cli and Jupyter render
-    loops). ``resume`` rides ``forwarded_props.command.resume``.
+    loops). ``resume`` rides ``forwarded_props.command.resume``; ``state`` seeds the
+    graph input (for agents whose input carries more than ``messages``).
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -375,7 +378,7 @@ async def iter_chunk_frames(
     run_input = RunAgentInput(
         thread_id=thread_id,
         run_id=str(uuid.uuid4()),
-        state={},
+        state=dict(state or {}),
         messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
         tools=[],
         context=[],
