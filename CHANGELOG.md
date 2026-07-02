@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.1] - 2026-07-02
+
+### Fixed
+- **README documented the removed event-layer API.** The 1.0.0 README was only
+  name-renamed, so its body still showed `StreamParser`, `langstage_core.events`,
+  `event_to_dict`, `stream_graph_updates`, and the removed display adapters — every
+  example failed to import against the 1.0 wheel (caught by dogfooding the published
+  docs). Rewritten as a slim quickstart for the actual 1.0 surface (host + AG-UI
+  bridge + task engine + resume helpers), with a migration table. Docs-only.
+
+## [1.0.0] - 2026-07-02
+
+### Changed
+- **Renamed `langgraph-stream-parser` → `langstage-core`; retired the event layer
+  (ADR 0002 / 0003).** AG-UI is now the sole streaming wire across the LangStage
+  family. Removed `StreamParser`, `events.py`, `event_to_dict`, `compat.py`,
+  `handlers/`, the message/interrupt extractors, and the display adapters
+  (`CLIAdapter`/`PrintAdapter`/`FastAPIAdapter`/`JupyterDisplay`). `SessionAdapter`
+  is now AG-UI-only.
+- **Kept:** `load_agent_spec`, `HostConfig`, `Workspace`, `prepare_agent_input`,
+  `create_resume_input`, the `tasks` engine, `extractors` (`ToolExtractor` +
+  built-ins), and the two shared mappings `agui.iter_event_frames` /
+  `agui.iter_chunk_frames`.
+- A `langgraph-stream-parser` 1.0.0 compat shim re-exports `langstage_core` under
+  the old import name with a `DeprecationWarning`.
+
 ## [0.6.13] - 2026-06-27
 
 ### Fixed
