@@ -232,6 +232,7 @@ async def iter_event_frames(
     *,
     resume: Any = None,
     max_result_len: int = 500,
+    extractors: Any = (),
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``event_to_dict``-
     shaped frames — the SAME wire vocabulary ``StreamParser`` + ``event_to_dict``
@@ -245,6 +246,12 @@ async def iter_event_frames(
     ``agent`` is an already-built ``LangGraphAgent`` (see :func:`build_agent`).
     ``resume`` (a decision answering an interrupt) rides
     ``forwarded_props.command.resume`` -> LangGraph ``Command(resume=...)``.
+
+    ``extractors`` is an optional iterable of :class:`~langgraph_stream_parser.extractors.base.ToolExtractor`
+    (``tool_name`` / ``extracted_type`` / ``extract(content)``). After each tool
+    result, the matching extractor (by tool name) runs; a non-None return emits an
+    ``extraction`` frame identical to ``event_to_dict(ToolExtractedEvent)`` — the
+    AG-UI home for domain callouts (e.g. hermes' skill/memory events).
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -254,6 +261,7 @@ async def iter_event_frames(
     import uuid
 
     allowed_decisions = ["reject", "edit", "respond", "approve"]
+    by_tool = {e.tool_name: e for e in extractors}
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
         thread_id=thread_id,
@@ -296,15 +304,26 @@ async def iter_event_frames(
             result = str(getattr(ev, "content", ""))
             if len(result) > max_result_len:
                 result = result[:max_result_len] + "…(truncated)"
+            name = tool_names.get(ev.tool_call_id, "tool")
             yield {
                 "type": "tool_end",
                 "id": ev.tool_call_id,
-                "name": tool_names.get(ev.tool_call_id, "tool"),
+                "name": name,
                 "result": result,
                 "status": "success",
                 "error_message": None,
                 "duration_ms": None,
             }
+            extractor = by_tool.get(name)
+            if extractor is not None:
+                data = extractor.extract(getattr(ev, "content", ""))
+                if data is not None:
+                    yield {
+                        "type": "extraction",
+                        "tool_name": name,
+                        "extracted_type": extractor.extracted_type,
+                        "data": data,
+                    }
         elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
             payload = getattr(ev, "value", None)
             if isinstance(payload, str):
