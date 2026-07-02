@@ -226,10 +226,15 @@ class SessionAdapter:
         pending_interrupt: dict[str, Any] | None = None
         if self._agui_agent is None:
             self._agui_agent = build_agent(self._graph)
+        # Clone per turn: the ag-ui-langgraph agent carries per-run state, so
+        # concurrent sessions (the task runner runs many at once) must not share
+        # one instance. clone() keeps the graph + checkpointer (thread state) but
+        # isolates the run — the same pattern build_app uses per request.
+        run_agent = self._agui_agent.clone()
         thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
         try:
             async for data in iter_event_frames(
-                self._agui_agent,
+                run_agent,
                 message,
                 thread_id,
                 resume=resume,

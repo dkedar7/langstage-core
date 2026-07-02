@@ -112,3 +112,74 @@ async def test_interrupt_then_resume_sets_outcomes():
     resumed = _drain(session.event_queue)
     assert session.outcome == "complete"
     assert "ok" in "".join(f["content"] for f in resumed if f["type"] == "content")
+
+
+# ── SessionAdapter behaviors ported from the retired StreamParser test ───────
+
+
+def _echo_ctx_graph():
+    """Echoes the last user message so tests can assert what reached the agent."""
+    def n(state):
+        last = state["messages"][-1].content if state["messages"] else ""
+        return {"messages": [AIMessage(content=f"echo: {last}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("n", n)
+    b.add_edge(START, "n")
+    b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+def _boom_graph():
+    def n(state):
+        raise RuntimeError("kaboom")
+
+    b = StateGraph(MessagesState)
+    b.add_node("n", n)
+    b.add_edge(START, "n")
+    b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+def _slow_graph():
+    async def n(state):
+        await asyncio.sleep(5)
+        return {"messages": [AIMessage(content="done")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("n", n)
+    b.add_edge(START, "n")
+    b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+async def test_context_parts_reach_the_agent():
+    adapter = SessionAdapter(graph=_echo_ctx_graph(), agui=True)
+    session = adapter.submit_message("s", "hello", context_parts=["[Current time: now]"])
+    await session.current_task
+    text = "".join(f["content"] for f in _drain(session.event_queue) if f.get("type") == "content")
+    assert "hello" in text and "Current time" in text
+
+
+async def test_error_path_sets_outcome_and_pushes_event():
+    adapter = SessionAdapter(graph=_boom_graph(), agui=True)
+    session = adapter.submit_message("s", "go")
+    await session.current_task
+    assert session.outcome == "error" and session.error
+    assert any(f.get("type") == "error" for f in _drain(session.event_queue))
+
+
+async def test_cancel_pushes_cancelled():
+    adapter = SessionAdapter(graph=_slow_graph(), agui=True)
+    session = adapter.submit_message("s", "wait")
+    await asyncio.sleep(0.05)
+    adapter.cancel("s")
+    await asyncio.gather(session.current_task, return_exceptions=True)
+    assert session.outcome == "cancelled"
+
+
+async def test_push_event_side_channel():
+    adapter = SessionAdapter(graph=_echo_ctx_graph(), agui=True)
+    adapter.push_event("s", {"type": "file_changed", "path": "x.py"})
+    frames = _drain(adapter.get("s").event_queue)
+    assert any(f.get("type") == "file_changed" for f in frames)
