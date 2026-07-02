@@ -1,7 +1,7 @@
 """The shared default agent factory.
 
 ``deepagents`` and ``langgraph`` are imported lazily inside the factory so the
-base ``langgraph-stream-parser`` install stays dependency-light — importing
+base ``langstage-core`` install stays dependency-light — importing
 this module does not require the ``[demo]`` extra; only *calling* the factory
 does.
 """
@@ -88,7 +88,7 @@ def create_default_agent(
         RuntimeError: If the ``deepagents`` extra is not installed.
 
     Example:
-        from langgraph_stream_parser.demo import create_default_agent
+        from langstage_core.demo import create_default_agent
         agent = create_default_agent("./workspace")
 
         # A host layering its own tools + middleware on the shared boilerplate:
@@ -105,7 +105,7 @@ def create_default_agent(
     except ImportError as exc:  # pragma: no cover - exercised via message only
         raise RuntimeError(
             "create_default_agent requires the 'deepagents' extra. "
-            "Install it with: pip install langgraph-stream-parser[demo]"
+            "Install it with: pip install langstage-core[demo]"
         ) from exc
 
     backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=virtual_mode)

@@ -6,14 +6,14 @@ server actually bound 127.0.0.1:8000 — the shown config and the real bind
 disagreed. host/port now come from the resolved HostConfig (CLI flags override),
 so --show-config reflects exactly what serve() binds.
 """
-from langgraph_stream_parser.agui.__main__ import main
+from langstage_core.agui.__main__ import main
 
 
 def test_version_returns_zero_and_prints_pkg(capsys):
     rc = main(["--version"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "langgraph-stream-parser" in out
+    assert "langstage-core" in out
 
 
 def test_show_config_reflects_port_override(capsys):

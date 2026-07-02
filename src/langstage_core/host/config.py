@@ -20,7 +20,7 @@ a once-per-var ``DeprecationWarning`` *and* a visible one-line stderr notice
 which owns that directory now.
 
 Discoverability: ``HostConfig.resolve().describe()`` (or
-``python -m langgraph_stream_parser.host``) prints each value, where it came
+``python -m langstage_core.host``) prints each value, where it came
 from, and the env var / TOML key that sets it — so you never have to remember
 the variable names.
 """
@@ -359,7 +359,7 @@ class HostConfig:
     def describe(self, omit_keys: list[str] | None = None) -> str:
         """Human-readable dump: value, source, and the env var / TOML key.
 
-        This is what ``python -m langgraph_stream_parser.host`` prints.
+        This is what ``python -m langstage_core.host`` prints.
 
         ``omit_keys`` hides inherited keys a particular stage doesn't actually
         honor — e.g. a stdio-only sidecar passes ``omit_keys=["host", "port"]``

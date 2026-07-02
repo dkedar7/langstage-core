@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 
-DEMO_SPEC = "langgraph_stream_parser.demo.stub:graph"
+DEMO_SPEC = "langstage_core.demo.stub:graph"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--version",
         action="store_true",
-        help="Print the langgraph-stream-parser version and exit.",
+        help="Print the langstage-core version and exit.",
     )
     args = parser.parse_args(argv)
 
@@ -60,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
         from importlib.metadata import PackageNotFoundError, version
 
         try:
-            print(f"langstage-agui (langgraph-stream-parser {version('langgraph-stream-parser')})")
+            print(f"langstage-agui (langstage-core {version('langstage-core')})")
         except PackageNotFoundError:  # pragma: no cover
-            print("langstage-agui (langgraph-stream-parser 0.0.0+local)")
+            print("langstage-agui (langstage-core 0.0.0+local)")
         return 0
 
     from ..host import HostConfig

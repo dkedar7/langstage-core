@@ -1,4 +1,4 @@
-"""``python -m langgraph_stream_parser.host`` — print the resolved shared config.
+"""``python -m langstage_core.host`` — print the resolved shared config.
 
 Shows each ``LANGSTAGE_*`` value (legacy ``DEEPAGENT_*`` names still resolve),
 where it resolved from (default / TOML / env / override), and the env var +
@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     # A tiny parser so `-h/--help` works and unknown flags error, instead of
     # every arg (including --help) being a silent no-op (gh #-dogfood).
     parser = argparse.ArgumentParser(
-        prog="python -m langgraph_stream_parser.host",
+        prog="python -m langstage_core.host",
         description="Print the resolved shared host config (value, source, env/TOML key) and exit.",
     )
     parser.add_argument(

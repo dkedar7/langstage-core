@@ -1,6 +1,6 @@
 """Task store: the persistence contract for the task-delegation engine.
 
-The engine (:class:`~langgraph_stream_parser.tasks.runner.TaskRunner`) depends
+The engine (:class:`~langstage_core.tasks.runner.TaskRunner`) depends
 only on the :class:`TaskStore` *protocol* — it never imports a database driver.
 Surfaces provide a concrete store:
 

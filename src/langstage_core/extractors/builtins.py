@@ -358,7 +358,7 @@ class GenericToolExtractor:
     generic "tool callout" card without per-tool knowledge.
 
     This is intentionally *opt-in* via the new
-    :class:`~langgraph_stream_parser.StreamParser` ``default_extractor``
+    :class:`~langstage_core.StreamParser` ``default_extractor``
     kwarg. The historical behaviour (only emit ``ToolExtractedEvent`` for
     tools with explicit extractors) is preserved by default so existing
     hosts that switch on specific extracted types don't suddenly receive

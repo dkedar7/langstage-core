@@ -11,8 +11,8 @@ as background agent sessions, and track them through a four-column board
   itself (added in a later release).
 
 Example:
-    from langgraph_stream_parser import SessionAdapter
-    from langgraph_stream_parser.tasks import TaskRunner, InMemoryTaskStore
+    from langstage_core import SessionAdapter
+    from langstage_core.tasks import TaskRunner, InMemoryTaskStore
 
     runner = TaskRunner(adapter, InMemoryTaskStore(), concurrency=3)
     await runner.start()

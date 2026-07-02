@@ -11,8 +11,8 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from langgraph_stream_parser.adapters.session import SessionAdapter
-from langgraph_stream_parser.tasks import (
+from langstage_core.adapters.session import SessionAdapter
+from langstage_core.tasks import (
     CANCELLED,
     DONE,
     FAILED,
@@ -25,8 +25,8 @@ from langgraph_stream_parser.tasks import (
     get_runner,
     set_runner,
 )
-from langgraph_stream_parser.tasks.store import now_iso
-from langgraph_stream_parser.tasks.tools import (
+from langstage_core.tasks.store import now_iso
+from langstage_core.tasks.tools import (
     cancel_async_task,
     check_async_task,
     list_async_tasks,

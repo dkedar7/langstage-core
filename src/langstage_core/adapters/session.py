@@ -1,6 +1,6 @@
 """Session-scoped streaming adapter for web hosts.
 
-Where :class:`~langgraph_stream_parser.adapters.fastapi.FastAPIAdapter` is
+Where :class:`~langstage_core.adapters.fastapi.FastAPIAdapter` is
 request-scoped (one turn per call), ``SessionAdapter`` keeps a long-lived
 session that:
 
@@ -14,7 +14,7 @@ session that:
 This absorbs the ``session_manager`` + ``sse_adapter`` + chat-route plumbing
 that ``cowork-dash`` used to carry in-tree.
 
-Requires: ``pip install langgraph-stream-parser[fastapi]`` for the SSE helper
+Requires: ``pip install langstage-core[fastapi]`` for the SSE helper
 (only the JSON framing needs nothing; ``asyncio`` is stdlib).
 """
 import asyncio

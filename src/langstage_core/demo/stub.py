@@ -9,11 +9,11 @@ agent — but the "model" is a local echo, so it needs no network and no keys.
 
 Point any surface at it with the standard spec string::
 
-    LANGSTAGE_AGENT_SPEC=langgraph_stream_parser.demo.stub:graph
+    LANGSTAGE_AGENT_SPEC=langstage_core.demo.stub:graph
 
 or build a customized one in code::
 
-    from langgraph_stream_parser.demo import create_stub_agent
+    from langstage_core.demo import create_stub_agent
     agent = create_stub_agent(name="My Demo")
 
 ``langgraph`` and ``langchain-core`` are imported lazily — importing this
@@ -65,7 +65,7 @@ def create_stub_agent(
         raise RuntimeError(
             "The stub agent needs langgraph + langchain-core, which aren't "
             "installed. Install the lightweight stub extra "
-            '(`pip install "langgraph-stream-parser[stub]"`) — or your stage\'s '
+            '(`pip install "langstage-core[stub]"`) — or your stage\'s '
             "own demo extra, or plain `pip install langgraph`: "
             f"{e}"
         ) from e

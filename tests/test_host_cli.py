@@ -1,4 +1,4 @@
-"""`python -m langgraph_stream_parser.host` argparse (gh #-dogfood).
+"""`python -m langstage_core.host` argparse (gh #-dogfood).
 
 It used to ignore all args — including --help, which was a silent no-op. It now
 has a tiny argparse so -h/--help works and unknown flags error.
@@ -9,7 +9,7 @@ import sys
 
 def _run(*args):
     return subprocess.run(
-        [sys.executable, "-m", "langgraph_stream_parser.host", *args],
+        [sys.executable, "-m", "langstage_core.host", *args],
         capture_output=True,
         text=True,
     )

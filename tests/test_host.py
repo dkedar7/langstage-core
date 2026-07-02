@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from langgraph_stream_parser.host import HostConfig, Workspace, load_agent_spec
+from langstage_core.host import HostConfig, Workspace, load_agent_spec
 
 
 # ── load_agent_spec ──────────────────────────────────────────────────

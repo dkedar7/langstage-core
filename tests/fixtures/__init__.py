@@ -1,1 +1,1 @@
-"""Test fixtures for langgraph-stream-parser."""
+"""Test fixtures for langstage-core."""

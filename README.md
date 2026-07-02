@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="assets/header.svg" alt="langgraph-stream-parser" width="100%">
+  <img src="assets/header.svg" alt="langstage-core" width="100%">
 </p>
 
-# langgraph-stream-parser
+# langstage-core
 
 Universal parser for LangGraph streaming outputs. Normalizes complex, variable output shapes from `graph.stream()` and `graph.astream()` into consistent, typed event objects.
 
 ## Every stage for your LangGraph agent
 
-`langgraph-stream-parser` is the shared core of the **[LangStage](https://github.com/dkedar7/langstage) family**: write your agent once — any LangGraph `CompiledGraph` — and run it on every stage with the same spec string (`module:attr` or `path/to/file.py:attr`), the same `langstage.toml` config file, and the same `LANGSTAGE_*` environment variables. (The pre-rename `deepagents.toml` / `DEEPAGENT_*` vocabulary still resolves as a deprecated fallback.)
+`langstage-core` is the shared core of the **[LangStage](https://github.com/dkedar7/langstage) family**: write your agent once — any LangGraph `CompiledGraph` — and run it on every stage with the same spec string (`module:attr` or `path/to/file.py:attr`), the same `langstage.toml` config file, and the same `LANGSTAGE_*` environment variables. (The pre-rename `deepagents.toml` / `DEEPAGENT_*` vocabulary still resolves as a deprecated fallback.)
 
 | Stage | Package | Try it |
 |---|---|---|
@@ -17,30 +17,30 @@ Universal parser for LangGraph streaming outputs. Normalizes complex, variable o
 | Terminal | [langstage-cli](https://github.com/dkedar7/langstage-cli) | `langstage-cli -a my_agent.py:graph` |
 | VS Code | [langstage-vscode](https://github.com/dkedar7/langstage-vscode) | chat participant + stdio sidecar |
 | Reference agent | [langstage-hermes](https://github.com/dkedar7/langstage-hermes) | `LANGSTAGE_AGENT_SPEC=langstage_hermes.agent:graph` on any stage |
-| Shared core | langgraph-stream-parser | **you are here** |
+| Shared core | langstage-core | **you are here** |
 
 📖 **Full documentation:** <https://dkedar7.github.io/langstage-docs/>
 
 No agent yet? Every stage has a keyless demo mode backed by this package's stub agent — no API key required:
 
 ```bash
-export LANGSTAGE_AGENT_SPEC=langgraph_stream_parser.demo.stub:graph  # or each CLI's --demo flag
+export LANGSTAGE_AGENT_SPEC=langstage_core.demo.stub:graph  # or each CLI's --demo flag
 ```
 
-And the resolved configuration (each value, its source, and the env var / `langstage.toml` key that sets it) is printable everywhere: `python -m langgraph_stream_parser.host`, or each CLI's `--show-config`.
+And the resolved configuration (each value, its source, and the env var / `langstage.toml` key that sets it) is printable everywhere: `python -m langstage_core.host`, or each CLI's `--show-config`.
 
 ## Serve any agent over AG-UI
 
 Any LangGraph agent can be served over the **[AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui)** — the event-based wire format for streaming rich agent interactions (text, tool calls, reasoning, state, and human-in-the-loop interrupts) to frontends. The host layer resolves *which* agent; the official, MIT-licensed `ag-ui-langgraph` adapter owns the wire:
 
 ```bash
-pip install "langgraph-stream-parser[agui]"
+pip install "langstage-core[agui]"
 langstage-agui --agent my_agent.py:graph     # serve over AG-UI at http://localhost:8050
 langstage-agui --demo                          # keyless echo agent, no API key
 ```
 
 ```python
-from langgraph_stream_parser.agui import build_app
+from langstage_core.agui import build_app
 app = build_app(my_compiled_graph)   # an ASGI app; run with uvicorn
 ```
 
@@ -49,7 +49,7 @@ This is the family's blessed path to the broad AG-UI frontend ecosystem (Copilot
 ## Installation
 
 ```bash
-pip install langgraph-stream-parser
+pip install langstage-core
 ```
 
 The core depends only on `langchain-core`. The Quick Start below parses *your*
@@ -59,18 +59,18 @@ own**, install the lightweight `stub` extra (just `langgraph`) for a bundled
 stub graph:
 
 ```bash
-pip install "langgraph-stream-parser[stub]"
+pip install "langstage-core[stub]"
 ```
 ```python
-from langgraph_stream_parser.demo import create_stub_agent
+from langstage_core.demo import create_stub_agent
 graph = create_stub_agent()   # a keyless echo agent you can stream
 ```
 
 ## Quick Start
 
 ```python
-from langgraph_stream_parser import StreamParser
-from langgraph_stream_parser.events import ContentEvent, ToolCallStartEvent, InterruptEvent
+from langstage_core import StreamParser
+from langstage_core.events import ContentEvent, ToolCallStartEvent, InterruptEvent
 
 parser = StreamParser()
 
@@ -124,7 +124,7 @@ All events have a `to_dict()` method for JSON serialization. Use `event_to_dict(
 ### Basic Parsing
 
 ```python
-from langgraph_stream_parser import StreamParser
+from langstage_core import StreamParser
 
 parser = StreamParser()
 
@@ -135,8 +135,8 @@ for event in parser.parse(graph.stream({"messages": [...]}, stream_mode="updates
 ### Pattern Matching (Python 3.10+)
 
 ```python
-from langgraph_stream_parser import StreamParser
-from langgraph_stream_parser.events import *
+from langstage_core import StreamParser
+from langstage_core.events import *
 
 parser = StreamParser()
 
@@ -168,8 +168,8 @@ for event in parser.parse(stream):
 ### Handling Interrupts
 
 ```python
-from langgraph_stream_parser import StreamParser
-from langgraph_stream_parser.events import InterruptEvent
+from langstage_core import StreamParser
+from langstage_core.events import InterruptEvent
 
 parser = StreamParser()
 config = {"configurable": {"thread_id": "my-thread"}}
@@ -212,8 +212,8 @@ resume = event.create_resume("edit", args_modifier=fn, use_edited_action=False)
 ### Custom Tool Extractors
 
 ```python
-from langgraph_stream_parser import StreamParser, ToolExtractor
-from langgraph_stream_parser.events import ToolExtractedEvent
+from langstage_core import StreamParser, ToolExtractor
+from langstage_core.events import ToolExtractedEvent
 
 class CanvasExtractor:
     tool_name = "add_to_canvas"
@@ -235,7 +235,7 @@ for event in parser.parse(stream):
 ### Async Support
 
 ```python
-from langgraph_stream_parser import StreamParser
+from langstage_core import StreamParser
 
 parser = StreamParser()
 
@@ -391,7 +391,7 @@ parser = StreamParser(
 For backward compatibility or simpler use cases:
 
 ```python
-from langgraph_stream_parser import stream_graph_updates, resume_graph_from_interrupt
+from langstage_core import stream_graph_updates, resume_graph_from_interrupt
 
 for update in stream_graph_updates(agent, input_data, config=config):
     if update.get("status") == "interrupt":
@@ -416,7 +416,7 @@ Pre-built adapters for rendering stream events in different environments:
 ### CLIAdapter - Styled Terminal Output
 
 ```python
-from langgraph_stream_parser.adapters import CLIAdapter
+from langstage_core.adapters import CLIAdapter
 
 adapter = CLIAdapter()
 adapter.run(
@@ -434,7 +434,7 @@ Features:
 ### PrintAdapter - Plain Text Output
 
 ```python
-from langgraph_stream_parser.adapters import PrintAdapter
+from langstage_core.adapters import PrintAdapter
 
 adapter = PrintAdapter()
 adapter.run(graph=agent, input_data=input_data, config=config)
@@ -448,7 +448,7 @@ Stream events to a web client over WebSocket or Server-Sent Events. The adapter 
 
 ```python
 from fastapi import FastAPI, WebSocket
-from langgraph_stream_parser.adapters import FastAPIAdapter
+from langstage_core.adapters import FastAPIAdapter
 
 app = FastAPI()
 adapter = FastAPIAdapter(graph=agent)  # agent must be compiled with a checkpointer
@@ -482,7 +482,7 @@ Server → Client: every event's `to_dict()` output (e.g. `{"type": "content", .
 
 ```python
 from fastapi.responses import StreamingResponse
-from langgraph_stream_parser import prepare_agent_input
+from langstage_core import prepare_agent_input
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, body: dict):
@@ -500,18 +500,18 @@ async def resume(session_id: str, body: dict):
     )
 ```
 
-Requires: `pip install langgraph-stream-parser[fastapi]`
+Requires: `pip install langstage-core[fastapi]`
 
 ### JupyterDisplay - Rich Notebook Display
 
 ```python
-from langgraph_stream_parser.adapters.jupyter import JupyterDisplay
+from langstage_core.adapters.jupyter import JupyterDisplay
 
 display = JupyterDisplay()
 display.run(graph=agent, input_data=input_data, config=config)
 ```
 
-Requires: `pip install langgraph-stream-parser[jupyter]`
+Requires: `pip install langstage-core[jupyter]`
 
 ### Adapter Options
 
@@ -531,7 +531,7 @@ adapter = CLIAdapter(
 Extend `BaseAdapter` for custom rendering:
 
 ```python
-from langgraph_stream_parser.adapters import BaseAdapter
+from langstage_core.adapters import BaseAdapter
 
 class MyAdapter(BaseAdapter):
     def render(self):
@@ -559,7 +559,7 @@ See [examples/fastapi_websocket.py](examples/fastapi_websocket.py) for a complet
 
 ```bash
 # Install dependencies
-pip install 'langgraph-stream-parser[fastapi]' uvicorn
+pip install 'langstage-core[fastapi]' uvicorn
 
 # Run the example
 uvicorn examples.fastapi_websocket:app --reload
@@ -577,7 +577,7 @@ pip install -e ".[dev]"
 pytest
 
 # Run tests with coverage
-pytest --cov=langgraph_stream_parser
+pytest --cov=langstage_core
 ```
 
 ## License

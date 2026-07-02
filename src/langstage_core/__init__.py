@@ -15,7 +15,7 @@ AG-UI adapter instead. What remains is the *durable* core —
 
 Quick start::
 
-    from langgraph_stream_parser.agui import build_agent, iter_event_frames
+    from langstage_core.agui import build_agent, iter_event_frames
     agent = build_agent(my_compiled_graph)
     async for frame in iter_event_frames(agent, "hello", "session-1"):
         ...   # {"type": "content" | "tool_start" | "interrupt" | ...}
@@ -49,7 +49,7 @@ from .tasks import (
 )
 
 try:
-    __version__ = version("langgraph-stream-parser")
+    __version__ = version("langstage-core")
 except PackageNotFoundError:  # pragma: no cover - editable/source checkout
     __version__ = "0.0.0+local"
 

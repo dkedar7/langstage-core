@@ -13,7 +13,7 @@ See ``docs/adr/0001-adopt-ag-ui-for-the-wire.md`` for the rationale.
 
 Requires the ``agui`` extra::
 
-    pip install "langgraph-stream-parser[agui]"
+    pip install "langstage-core[agui]"
 
 Quick start::
 
@@ -21,7 +21,7 @@ Quick start::
     langstage-agui --agent my_agent.py:graph
 
     # Or in code:
-    from langgraph_stream_parser.agui import build_app
+    from langstage_core.agui import build_app
     app = build_app(my_compiled_graph)   # an ASGI app; run with uvicorn
 """
 # NB: intentionally NOT `from __future__ import annotations`. The resilient
@@ -44,7 +44,7 @@ DEFAULT_AGENT_NAME = "LangStage Agent"
 
 _IMPORT_HINT = (
     "AG-UI support needs the 'agui' extra: "
-    'pip install "langgraph-stream-parser[agui]"'
+    'pip install "langstage-core[agui]"'
 )
 
 
@@ -208,7 +208,7 @@ def serve(
 
     ``spec_or_graph`` is either an agent spec string (``module:attr`` or
     ``path/to/file.py:attr`` — resolved via the host layer's
-    :func:`~langgraph_stream_parser.host.load_agent_spec`) or an already
+    :func:`~langstage_core.host.load_agent_spec`) or an already
     compiled graph. Blocks running a uvicorn server.
     """
     if isinstance(spec_or_graph, str):
@@ -248,7 +248,7 @@ async def iter_event_frames(
     ``resume`` (a decision answering an interrupt) rides
     ``forwarded_props.command.resume`` -> LangGraph ``Command(resume=...)``.
 
-    ``extractors`` is an optional iterable of :class:`~langgraph_stream_parser.extractors.base.ToolExtractor`
+    ``extractors`` is an optional iterable of :class:`~langstage_core.extractors.base.ToolExtractor`
     (``tool_name`` / ``extracted_type`` / ``extract(content)``). After each tool
     result, the matching extractor (by tool name) runs; a non-None return emits an
     ``extraction`` frame identical to ``event_to_dict(ToolExtractedEvent)`` — the

@@ -8,11 +8,11 @@ everything.
 
 Requires the optional ``deepagents`` dependency:
 
-    pip install langgraph-stream-parser[demo]
+    pip install langstage-core[demo]
 
 This package also ships the keyless **stub agent** behind every surface's
 ``--demo`` mode (:func:`create_stub_agent` / spec
-``langgraph_stream_parser.demo.stub:graph``) — that one needs no API key and only
+``langstage_core.demo.stub:graph``) — that one needs no API key and only
 ``langgraph`` (installed by any host surface, or via the lightweight ``[stub]``
 extra), not the full ``[demo]``/deepagents stack.
 """

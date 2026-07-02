@@ -20,8 +20,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import interrupt
 
-from langgraph_stream_parser import load_agent_spec
-from langgraph_stream_parser.adapters import SessionAdapter
+from langstage_core import load_agent_spec
+from langstage_core.adapters import SessionAdapter
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,7 +34,7 @@ def _drain(queue: asyncio.Queue) -> List[dict]:
 
 
 async def test_text_and_outcome_on_demo_stub():
-    adapter = SessionAdapter(graph=load_agent_spec("langgraph_stream_parser.demo.stub:graph"), agui=True)
+    adapter = SessionAdapter(graph=load_agent_spec("langstage_core.demo.stub:graph"), agui=True)
     session = adapter.submit_message(None, "hello web")
     await session.current_task
     frames = _drain(session.event_queue)
