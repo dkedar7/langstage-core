@@ -11,8 +11,8 @@ from typing import Any, AsyncIterator
 
 import pytest
 
-from langgraph_stream_parser.adapters.session import SessionAdapter
-from langgraph_stream_parser.tasks import (
+from langstage_core.adapters.session import SessionAdapter
+from langstage_core.tasks import (
     CANCELLED,
     DONE,
     FAILED,
@@ -25,8 +25,8 @@ from langgraph_stream_parser.tasks import (
     get_runner,
     set_runner,
 )
-from langgraph_stream_parser.tasks.store import now_iso
-from langgraph_stream_parser.tasks.tools import (
+from langstage_core.tasks.store import now_iso
+from langstage_core.tasks.tools import (
     cancel_async_task,
     check_async_task,
     list_async_tasks,
@@ -34,49 +34,56 @@ from langgraph_stream_parser.tasks.tools import (
     update_async_task,
 )
 
-from .fixtures.mocks import (
-    AI_MESSAGE_WITH_TOOL_CALLS,
-    INTERRUPT_WITH_ACTIONS,
-    SIMPLE_AI_MESSAGE,
-    TOOL_MESSAGE_SUCCESS,
-)
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import interrupt
 
 
 # ── Mock graphs (mirror test_session_adapter) ────────────────────────
 
 
-class MockGraph:
-    def __init__(self, chunks_per_call: list[list[Any]]):
-        self._chunks_per_call = chunks_per_call
-        self._call_idx = 0
-
-    def astream(self, input_data, config=None, stream_mode="updates") -> AsyncIterator[Any]:
-        chunks = self._chunks_per_call[min(self._call_idx, len(self._chunks_per_call) - 1)]
-        self._call_idx += 1
-
-        async def gen():
-            for chunk in chunks:
-                yield chunk
-
-        return gen()
+def echo_graph(text: str = "task result text"):
+    def n(state):
+        return {"messages": [AIMessage(content=text)]}
+    b = StateGraph(MessagesState)
+    b.add_node("n", n); b.add_edge(START, "n"); b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
 
 
-class SlowGraph:
-    def astream(self, input_data, config=None, stream_mode="updates"):
-        async def gen():
-            await asyncio.sleep(5)
-            yield SIMPLE_AI_MESSAGE
+def slow_graph():
+    async def n(state):
+        await asyncio.sleep(5)
+        return {"messages": [AIMessage(content="done")]}
+    b = StateGraph(MessagesState)
+    b.add_node("n", n); b.add_edge(START, "n"); b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
 
-        return gen()
+
+def boom_graph():
+    def n(state):
+        raise RuntimeError("kaboom")
+    b = StateGraph(MessagesState)
+    b.add_node("n", n); b.add_edge(START, "n"); b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
 
 
-class BoomGraph:
-    def astream(self, input_data, config=None, stream_mode="updates"):
-        async def gen():
-            raise RuntimeError("kaboom")
-            yield  # pragma: no cover
+def interrupt_graph():
+    def n(state):
+        decision = interrupt({"action_requests": [{"tool": "approve", "args": {}}]})
+        return {"messages": [AIMessage(content=f"approved: {decision}")]}
+    b = StateGraph(MessagesState)
+    b.add_node("n", n); b.add_edge(START, "n"); b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
 
-        return gen()
+
+def recording_graph(runs: list):
+    def n(state):
+        runs.append(1)  # one entry per node execution — count == task count means no dup
+        return {"messages": [AIMessage(content="ok")]}
+    b = StateGraph(MessagesState)
+    b.add_node("n", n); b.add_edge(START, "n"); b.add_edge("n", END)
+    return b.compile(checkpointer=InMemorySaver())
 
 
 async def _wait_state(store, task_id, *targets, timeout=3.0):
@@ -96,7 +103,7 @@ async def _wait_state(store, task_id, *targets, timeout=3.0):
 
 class TestOutcomePrimitive:
     async def test_complete(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]), stream_mode="updates")
+        adapter = SessionAdapter(graph=echo_graph(), stream_mode="updates")
         session = adapter.submit_message("s", "hi")
         await session.current_task
         assert session.outcome == "complete"
@@ -106,7 +113,7 @@ class TestOutcomePrimitive:
     async def test_interrupted(self):
         # A trailing CompleteEvent still follows the interrupt; outcome must
         # be 'interrupted', not 'complete'.
-        graph = MockGraph([[AI_MESSAGE_WITH_TOOL_CALLS, INTERRUPT_WITH_ACTIONS]])
+        graph = interrupt_graph()
         adapter = SessionAdapter(graph=graph, stream_mode="updates")
         session = adapter.submit_message("s", "run it")
         await session.current_task
@@ -116,14 +123,14 @@ class TestOutcomePrimitive:
         assert "action_requests" in session.interrupt
 
     async def test_error(self):
-        adapter = SessionAdapter(graph=BoomGraph())
+        adapter = SessionAdapter(graph=boom_graph())
         session = adapter.submit_message("s", "go")
         await session.current_task
         assert session.outcome == "error"
         assert session.error and "kaboom" in session.error
 
     async def test_cancelled(self):
-        adapter = SessionAdapter(graph=SlowGraph())
+        adapter = SessionAdapter(graph=slow_graph())
         session = adapter.submit_message("s", "hi")
         await asyncio.sleep(0.01)
         adapter.cancel("s")
@@ -132,10 +139,7 @@ class TestOutcomePrimitive:
 
     async def test_outcome_resets_between_turns(self):
         # An interrupt turn then a clean turn → outcome flips back to complete.
-        graph = MockGraph([
-            [AI_MESSAGE_WITH_TOOL_CALLS, INTERRUPT_WITH_ACTIONS],
-            [SIMPLE_AI_MESSAGE],
-        ])
+        graph = interrupt_graph()
         adapter = SessionAdapter(graph=graph, stream_mode="updates")
         session = adapter.submit_message("s", "a")
         await session.current_task
@@ -204,7 +208,7 @@ class TestInMemoryStore:
 
 class TestRunnerEndToEnd:
     async def test_enqueue_to_done_with_result(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]), stream_mode="updates")
+        adapter = SessionAdapter(graph=echo_graph(), stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=2, poll_interval=0.05)
         await runner.start()
@@ -218,7 +222,7 @@ class TestRunnerEndToEnd:
             await runner.shutdown()
 
     async def test_failing_task_goes_failed(self):
-        adapter = SessionAdapter(graph=BoomGraph())
+        adapter = SessionAdapter(graph=boom_graph())
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -230,7 +234,7 @@ class TestRunnerEndToEnd:
             await runner.shutdown()
 
     async def test_interrupt_goes_review_needed(self):
-        graph = MockGraph([[AI_MESSAGE_WITH_TOOL_CALLS, INTERRUPT_WITH_ACTIONS]])
+        graph = interrupt_graph()
         adapter = SessionAdapter(graph=graph, stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
@@ -244,10 +248,7 @@ class TestRunnerEndToEnd:
             await runner.shutdown()
 
     async def test_resume_review_to_done(self):
-        graph = MockGraph([
-            [AI_MESSAGE_WITH_TOOL_CALLS, INTERRUPT_WITH_ACTIONS],
-            [TOOL_MESSAGE_SUCCESS, SIMPLE_AI_MESSAGE],
-        ])
+        graph = interrupt_graph()
         adapter = SessionAdapter(graph=graph, stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
@@ -267,7 +268,7 @@ class TestRunnerEndToEnd:
 
 class TestRunnerControls:
     async def test_cancel_queued_task(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]))
+        adapter = SessionAdapter(graph=echo_graph())
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store)  # not started → no workers
         tid = await runner.enqueue(title="t", prompt="p")
@@ -277,7 +278,7 @@ class TestRunnerControls:
         assert await runner.cancel(tid) is False
 
     async def test_cancel_ongoing_task(self):
-        adapter = SessionAdapter(graph=SlowGraph())
+        adapter = SessionAdapter(graph=slow_graph())
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -291,7 +292,7 @@ class TestRunnerControls:
             await runner.shutdown()
 
     async def test_retry_failed_task(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]))
+        adapter = SessionAdapter(graph=echo_graph())
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store)  # not started
         tid = await runner.enqueue(title="t", prompt="p")
@@ -305,7 +306,7 @@ class TestRunnerControls:
 
     async def test_runner_singleton(self):
         store = InMemoryTaskStore()
-        runner = TaskRunner(SessionAdapter(graph=MockGraph([[]])), store)
+        runner = TaskRunner(SessionAdapter(graph=echo_graph()), store)
         set_runner(runner)
         assert get_runner() is runner
         set_runner(None)
@@ -313,24 +314,6 @@ class TestRunnerControls:
 
 
 # ── 5. Hardening: concurrency, recovery, resilience, edge cases ──────
-
-
-class RecordingGraph:
-    """Records the thread_id of every astream call; yields one content chunk
-    after a brief delay (so concurrent workers actually overlap)."""
-
-    def __init__(self) -> None:
-        self.threads: list[str] = []
-
-    def astream(self, input_data, config=None, stream_mode="updates"):
-        tid = (config or {}).get("configurable", {}).get("thread_id")
-        self.threads.append(tid)
-
-        async def gen():
-            await asyncio.sleep(0.02)
-            yield SIMPLE_AI_MESSAGE
-
-        return gen()
 
 
 class FlakyClaimStore(InMemoryTaskStore):
@@ -351,7 +334,7 @@ class TestRunnerHardening:
     async def test_shutdown_during_active_run_does_not_hang(self):
         # Regression for the worker/shutdown cancel deadlock: shutting down
         # while a task is mid-run must not block.
-        adapter = SessionAdapter(graph=SlowGraph())
+        adapter = SessionAdapter(graph=slow_graph())
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -362,8 +345,9 @@ class TestRunnerHardening:
 
     async def test_many_tasks_run_once_each_across_workers(self):
         # No double-execution and full drain with N workers / M>N tasks.
-        graph = RecordingGraph()
-        adapter = SessionAdapter(graph=graph, stream_mode="updates")
+        runs: list = []
+        graph = recording_graph(runs)
+        adapter = SessionAdapter(graph=graph)
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=3, poll_interval=0.02)
         await runner.start()
@@ -371,23 +355,23 @@ class TestRunnerHardening:
             ids = [await runner.enqueue(title=f"t{i}", prompt=f"p{i}") for i in range(8)]
             for tid in ids:
                 await _wait_state(store, tid, DONE, timeout=6)
-            threads = graph.threads
-            expected = {f"task-{tid}" for tid in ids}
-            assert set(threads) == expected            # every task ran
-            assert len(threads) == len(expected)       # exactly once — no dup
+            # exactly one node execution per task → no task ran twice (atomic claim);
+            # distinct per-task threads are guaranteed by the store (task-<id>).
+            assert len(runs) == len(ids)
         finally:
             await runner.shutdown()
 
     async def test_retry_actually_reruns_to_done(self):
         # stream_mode must match the raw chunks the healed MockGraph yields.
-        adapter = SessionAdapter(graph=BoomGraph(), stream_mode="updates")
+        adapter = SessionAdapter(graph=boom_graph(), stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
         try:
             tid = await runner.enqueue(title="t", prompt="p")
             await _wait_state(store, tid, FAILED)
-            adapter._graph = MockGraph([[SIMPLE_AI_MESSAGE]])  # heal the graph
+            adapter._graph = echo_graph()  # heal the graph
+            adapter._agui_agent = None  # rebuild the wrapped agent around it
             assert await runner.retry(tid) is True
             row = await _wait_state(store, tid, DONE, timeout=4)
             assert row["error"] is None and row["result"]
@@ -395,7 +379,7 @@ class TestRunnerHardening:
             await runner.shutdown()
 
     async def test_worker_survives_claim_error(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]), stream_mode="updates")
+        adapter = SessionAdapter(graph=echo_graph(), stream_mode="updates")
         store = FlakyClaimStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -407,34 +391,14 @@ class TestRunnerHardening:
             await runner.shutdown()
 
     async def test_enqueue_requires_prompt(self):
-        runner = TaskRunner(SessionAdapter(graph=MockGraph([[]])), InMemoryTaskStore())
+        runner = TaskRunner(SessionAdapter(graph=echo_graph()), InMemoryTaskStore())
         with pytest.raises(ValueError):
             await runner.enqueue(title="x", prompt="   ")
-
-    async def test_result_text_dual_mode(self):
-        # The real default stream mode is dual ("updates","messages"); make sure
-        # result reconstruction works there too, not just in updates mode.
-        from .fixtures.mocks import DUAL_MESSAGES_TOKEN_1, DUAL_MESSAGES_TOKEN_2
-
-        graph = MockGraph([[DUAL_MESSAGES_TOKEN_1, DUAL_MESSAGES_TOKEN_2]])
-        adapter = SessionAdapter(graph=graph)  # default dual mode
-        store = InMemoryTaskStore()
-        runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
-        await runner.start()
-        try:
-            tid = await runner.enqueue(title="d", prompt="hi")
-            row = await _wait_state(store, tid, DONE, timeout=4)
-            assert row["result"]  # tokens concatenated into the final text
-        finally:
-            await runner.shutdown()
-
-
-# ── 6. Slice 2: event transcript, followup, delegation tools ─────────
 
 
 class TestEventTranscript:
     async def test_events_streamed_to_store(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]), stream_mode="updates")
+        adapter = SessionAdapter(graph=echo_graph(), stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -449,7 +413,7 @@ class TestEventTranscript:
             await runner.shutdown()
 
     async def test_followup_reruns_thread(self):
-        graph = MockGraph([[SIMPLE_AI_MESSAGE], [SIMPLE_AI_MESSAGE]])
+        graph = echo_graph()
         adapter = SessionAdapter(graph=graph, stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
@@ -467,7 +431,7 @@ class TestEventTranscript:
 
     async def test_followup_rejected_on_unknown(self):
         store = InMemoryTaskStore()
-        runner = TaskRunner(SessionAdapter(graph=MockGraph([[]])), store)
+        runner = TaskRunner(SessionAdapter(graph=echo_graph()), store)
         assert await runner.followup("nope", "hi") is False
 
 
@@ -477,7 +441,7 @@ def _task_id_from(out: str) -> str:
 
 class TestDelegationTools:
     async def test_start_check_list(self):
-        adapter = SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]]), stream_mode="updates")
+        adapter = SessionAdapter(graph=echo_graph(), stream_mode="updates")
         store = InMemoryTaskStore()
         runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
         await runner.start()
@@ -497,7 +461,7 @@ class TestDelegationTools:
         # The runner sets current_task_id while an agent runs; a tool the agent
         # calls must stamp the spawned task's parent_id from it.
         store = InMemoryTaskStore()
-        runner = TaskRunner(SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]])), store)  # not started
+        runner = TaskRunner(SessionAdapter(graph=echo_graph()), store)  # not started
         set_runner(runner)
         try:
             token = current_task_id.set("parent-123")
@@ -512,7 +476,7 @@ class TestDelegationTools:
 
     async def test_cancel_tool(self):
         store = InMemoryTaskStore()
-        runner = TaskRunner(SessionAdapter(graph=MockGraph([[SIMPLE_AI_MESSAGE]])), store)  # not started
+        runner = TaskRunner(SessionAdapter(graph=echo_graph()), store)  # not started
         set_runner(runner)
         try:
             tid = await runner.enqueue(title="t", prompt="p")

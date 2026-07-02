@@ -1,6 +1,6 @@
 [project]
-name = "langgraph-stream-parser"
-version = "0.6.19"
+name = "langstage-core"
+version = "1.0.0"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}
@@ -31,8 +31,8 @@ classifiers = [
 
 dependencies = [
     # Base import chain imports `langchain_core.tools` at module top level
-    # (langgraph_stream_parser.tasks.tools). This must be a hard dependency so a
-    # bare `pip install langgraph-stream-parser` can `import langgraph_stream_parser`.
+    # (langstage_core.tasks.tools). This must be a hard dependency so a
+    # bare `pip install langstage-core` can `import langstage_core`.
     "langchain-core>=1.4",
 ]
 
@@ -78,20 +78,20 @@ dev = [
 ]
 
 [project.scripts]
-langstage-agui = "langgraph_stream_parser.agui.__main__:main"
+langstage-agui = "langstage_core.agui.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/dkedar7/langgraph-stream-parser"
-Documentation = "https://github.com/dkedar7/langgraph-stream-parser#readme"
-Repository = "https://github.com/dkedar7/langgraph-stream-parser"
-Issues = "https://github.com/dkedar7/langgraph-stream-parser/issues"
+Homepage = "https://github.com/dkedar7/langstage-core"
+Documentation = "https://github.com/dkedar7/langstage-core#readme"
+Repository = "https://github.com/dkedar7/langstage-core"
+Issues = "https://github.com/dkedar7/langstage-core/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/langgraph_stream_parser"]
+packages = ["src/langstage_core"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -101,7 +101,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/langgraph_stream_parser"]
+source = ["src/langstage_core"]
 branch = true
 
 [tool.coverage.report]

@@ -9,7 +9,7 @@ import warnings
 
 import pytest
 
-from langgraph_stream_parser.demo.agent import _safe_agent_name, create_default_agent
+from langstage_core.demo.agent import _safe_agent_name, create_default_agent
 
 
 def test_default_name_is_provider_safe():

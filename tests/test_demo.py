@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from langgraph_stream_parser.demo import create_default_agent
+from langstage_core.demo import create_default_agent
 
 
 def _deepagents_installed() -> bool:

@@ -1,4 +1,4 @@
-"""Tests for the AG-UI bridge (langgraph_stream_parser.agui).
+"""Tests for the AG-UI bridge (langstage_core.agui).
 
 These run end to end against the keyless demo stub: build an AG-UI ASGI app,
 POST a RunAgentInput, and assert the AG-UI event stream comes back with a clean
@@ -15,8 +15,8 @@ pytest.importorskip("ag_ui_langgraph", reason="needs the 'agui' extra")
 pytest.importorskip("fastapi", reason="needs fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from langgraph_stream_parser.agui import build_agent, build_app  # noqa: E402
-from langgraph_stream_parser.demo import create_stub_agent  # noqa: E402
+from langstage_core.agui import build_agent, build_app  # noqa: E402
+from langstage_core.demo import create_stub_agent  # noqa: E402
 
 
 def _run_input(text: str) -> dict:

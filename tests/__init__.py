@@ -1,1 +1,1 @@
-"""Tests for langgraph-stream-parser."""
+"""Tests for langstage-core."""

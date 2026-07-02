@@ -5,7 +5,7 @@ from typing import ClassVar
 
 import pytest
 
-from langgraph_stream_parser.host import HostConfig
+from langstage_core.host import HostConfig
 
 
 @pytest.fixture
@@ -146,7 +146,7 @@ class TestLangstageVocabulary:
         assert cfg.sources["port"] == "env:LANGSTAGE_PORT"
 
     def test_legacy_env_warns_once(self, isolated_global, tmp_path):
-        import langgraph_stream_parser.host.config as config_mod
+        import langstage_core.host.config as config_mod
 
         config_mod._warned_legacy_env.discard("DEEPAGENT_TITLE")
         with pytest.warns(DeprecationWarning, match="LANGSTAGE_TITLE"):
@@ -156,7 +156,7 @@ class TestLangstageVocabulary:
         # The DeprecationWarning is swallowed by Python's default filter, so the
         # resolver ALSO prints a one-line notice to stderr for CLI users. Drop
         # the pytest marker env so the notice isn't suppressed.
-        import langgraph_stream_parser.host.config as config_mod
+        import langstage_core.host.config as config_mod
 
         config_mod._warned_legacy_env.discard("DEEPAGENT_PORT")
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -172,7 +172,7 @@ class TestLangstageVocabulary:
         # PYTEST_CURRENT_TEST is set during this test, so no stderr notice fires
         # (keeps test output clean and can't break captured-output assertions in
         # the surface repos' suites).
-        import langgraph_stream_parser.host.config as config_mod
+        import langstage_core.host.config as config_mod
 
         config_mod._warned_legacy_env.discard("DEEPAGENT_DEBUG")
         HostConfig.resolve(env={"DEEPAGENT_DEBUG": "true"}, toml_start=tmp_path)
@@ -181,7 +181,7 @@ class TestLangstageVocabulary:
     def test_legacy_env_notice_suppressed_by_env(self, isolated_global, tmp_path, monkeypatch, capsys):
         import warnings
 
-        import langgraph_stream_parser.host.config as config_mod
+        import langstage_core.host.config as config_mod
 
         config_mod._warned_legacy_env.discard("DEEPAGENT_HOST")
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)

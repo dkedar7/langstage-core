@@ -9,8 +9,8 @@ import pytest
 pytest.importorskip("ag_ui_langgraph")
 pytest.importorskip("fastapi")
 
-from langgraph_stream_parser import load_agent_spec
-from langgraph_stream_parser.agui import build_agent, iter_chunk_frames, iter_event_frames
+from langstage_core import load_agent_spec
+from langstage_core.agui import build_agent, iter_chunk_frames, iter_event_frames
 
 pytestmark = pytest.mark.asyncio
 
@@ -20,7 +20,7 @@ async def _collect(aiter):
 
 
 async def test_iter_chunk_frames_shape():
-    agent = build_agent(load_agent_spec("langgraph_stream_parser.demo.stub:graph"))
+    agent = build_agent(load_agent_spec("langstage_core.demo.stub:graph"))
     frames = await _collect(iter_chunk_frames(agent, "chunk wire", "t1"))
     assert frames[-1] == {"status": "complete"}
     content = [f for f in frames if f.get("status") == "streaming" and "chunk" in f]
@@ -29,7 +29,7 @@ async def test_iter_chunk_frames_shape():
 
 
 async def test_iter_event_frames_shape():
-    agent = build_agent(load_agent_spec("langgraph_stream_parser.demo.stub:graph"))
+    agent = build_agent(load_agent_spec("langstage_core.demo.stub:graph"))
     frames = await _collect(iter_event_frames(agent, "event wire", "t2"))
     assert frames[-1] == {"type": "complete"}
     content = [f for f in frames if f.get("type") == "content"]

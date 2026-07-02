@@ -1,7 +1,7 @@
 """AG-UI edge-case matrix — exercises the bridge against purpose-built agents
 that each stress one event class, asserting the *observed* AG-UI output.
 
-This is the audit that converts the langgraph-stream-parser -> AG-UI mapping
+This is the audit that converts the langstage-core -> AG-UI mapping
 from "claimed" to "proven", and it pins the three robustness fixes the audit
 surfaced:
   1. graphs compiled WITHOUT a checkpointer are auto-handled (AG-UI's
@@ -33,8 +33,8 @@ from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 from langgraph.types import interrupt  # noqa: E402
 
-from langgraph_stream_parser.agui import build_app  # noqa: E402
-from langgraph_stream_parser.demo import create_stub_agent  # noqa: E402
+from langstage_core.agui import build_app  # noqa: E402
+from langstage_core.demo import create_stub_agent  # noqa: E402
 
 
 # ── driver ───────────────────────────────────────────────────────────
