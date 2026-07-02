@@ -1,6 +1,6 @@
 # ADR 0003 — Deprecate and retire the event layer
 
-**Status:** Proposed — 2026-07-01
+**Status:** Accepted — 2026-07-01
 **Decision owner:** Kedar Dabhadkar
 **Builds on:** [ADR 0001](0001-adopt-ag-ui-for-the-wire.md), [ADR 0002](0002-execute-event-layer-retirement.md)
 
