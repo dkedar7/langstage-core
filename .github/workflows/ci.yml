@@ -34,7 +34,7 @@ jobs:
         run: uv pip install --system -e ".[dev]"
 
       - name: Test
-        run: pytest -ra --cov=langgraph_stream_parser --cov-report=term-missing
+        run: pytest -ra --cov=langstage_core --cov-report=term-missing
 
   minimal-install:
     runs-on: ubuntu-latest
@@ -54,4 +54,4 @@ jobs:
 
       - name: Import smoke on a minimal install
         run: |
-          python -c "import langgraph_stream_parser; from langgraph_stream_parser import StreamParser, load_agent_spec; from langgraph_stream_parser.tasks import TaskRunner, TASK_TOOLS; print('ok')"
+          python -c "import langstage_core; from langstage_core import load_agent_spec; from langstage_core.tasks import TaskRunner, TASK_TOOLS; from langstage_core.agui import build_agent; print('ok')"
