@@ -68,6 +68,35 @@ async def test_event_frames_carry_real_node_names():
     assert by_text.get("from second.") == "second"
 
 
+def _echo_graph():
+    """A non-token (snapshot-delivered) agent that echoes the last user message."""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("echo", lambda s: {"messages": [AIMessage(content=f"reply to: {s['messages'][-1].content}")]})
+    b.add_edge(START, "echo")
+    b.add_edge("echo", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+async def test_snapshot_agent_does_not_replay_history():
+    # gh #67: a non-token agent delivers content via the final snapshot, which is the
+    # FULL thread. Turn 2 must emit only turn 2's reply, not re-render turn 1.
+    agent = build_agent(_echo_graph())
+
+    # chunk-frames turn
+    t1 = [f["chunk"] for f in await _collect(iter_chunk_frames(agent, "ONE", "t67")) if "chunk" in f]
+    t2 = [f["chunk"] for f in await _collect(iter_chunk_frames(agent, "TWO", "t67")) if "chunk" in f]
+    assert any("TWO" in c for c in t2)
+    assert not any("ONE" in c for c in t2), f"replayed history: {t2}"
+    # event-frames turn (separate thread)
+    e1 = [f["content"] for f in await _collect(iter_event_frames(agent, "ONE", "t67e")) if f.get("type") == "content"]
+    e2 = [f["content"] for f in await _collect(iter_event_frames(agent, "TWO", "t67e")) if f.get("type") == "content"]
+    assert any("TWO" in c for c in e2) and not any("ONE" in c for c in e2), f"replayed history: {e2}"
+
+
 async def test_iter_event_frames_runs_extractors():
     """extractors= runs a matching extractor over each tool result and emits an
     `extraction` frame (ADR 0003 Stage 1, productionized)."""
