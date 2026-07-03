@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.3] - 2026-07-02
+
+### Fixed
+- **A malformed config file crashed every entrypoint (gh #42).** Config resolves at
+  import time on several surfaces, so a raw `TOMLDecodeError` (or an unreadable
+  file) from a broken `langstage.toml` killed `--version` / `--help` / `--demo`,
+  the `deepagent-*` aliases, the server extension, and even `import langstage_jupyter`
+  — not just the command that needed the config. `_read_toml` now skips a bad file
+  with a visible one-line notice and falls back to environment + defaults.
+
+### Added
+- **Legacy `deepagents.toml` now emits a deprecation notice (gh #25).** The legacy
+  `DEEPAGENT_*` env vars already warned on use, but a legacy `deepagents.toml`
+  (project) or `~/.deepagents/config.toml` (global) resolved silently. It now raises
+  a once-per-file `DeprecationWarning` + a visible stderr notice (same
+  `LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1` opt-out and pytest suppression as the env
+  notice), closing the advertised-parity gap.
+
 ## [1.0.2] - 2026-07-02
 
 ### Fixed

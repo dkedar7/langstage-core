@@ -107,6 +107,41 @@ def _print_legacy_env_notice(legacy: str, canonical: str) -> None:
     )
 
 
+_warned_legacy_toml: set[str] = set()
+
+
+def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
+    """Visible deprecation notice when a legacy-named TOML file is resolved
+    (project ``deepagents.toml`` or global ``~/.deepagents/config.toml``).
+
+    The legacy ``DEEPAGENT_*`` *env vars* already warn on use, but the legacy
+    *TOML* files resolved silently — so a user who moved their env to
+    ``LANGSTAGE_*`` but kept a ``deepagents.toml`` got no nudge (the same
+    advertised-parity gap the env notice closes). Same once-per-file dedupe,
+    ``LANGSTAGE_SUPPRESS_LEGACY_NOTICE`` opt-out, and pytest suppression as
+    ``_warn_legacy_env``. (gh #25)
+    """
+    key = str(path)
+    if key in _warned_legacy_toml:
+        return
+    _warned_legacy_toml.add(key)
+    if _env_bool(os.getenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE")):
+        return
+    warnings.warn(
+        f"{path} is deprecated; rename it to {canonical_name}.",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    print(
+        f"note: config file {path} uses the legacy name; rename it to "
+        f"{canonical_name}. (Legacy deepagents.toml support will be removed in a "
+        "future release; set LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1 to silence.)",
+        file=sys.stderr,
+    )
+
+
 def _env_bool(value: str | None, default: bool = False) -> bool:
     """Parse an env-var string into a bool."""
     if value is None or value == "":
@@ -160,7 +195,20 @@ def _read_toml(path: Path) -> dict:
     # Windows, and `tomllib.load()` (binary) chokes on it with a cryptic
     # "Invalid statement (at line 1, column 1)" — which, because jupyter's
     # config resolves at import time, bricked the whole extension. (gh #-dogfood)
-    return _tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    try:
+        return _tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:  # noqa: BLE001 — a broken config must not brick every entrypoint
+        # Several surfaces resolve config at import time, so a raw TOMLDecodeError
+        # (or an unreadable file) here would kill --version / --help / --demo,
+        # `import langstage_jupyter`, and the server extension — not just the command
+        # that needs the config. Skip the bad file with a visible one-line notice and
+        # fall back to env + defaults. ASCII-only (cp1252-safe). (gh #42)
+        print(
+            f"note: ignoring malformed config {path} "
+            f"({type(exc).__name__}: {exc}); using environment + defaults instead.",
+            file=sys.stderr,
+        )
+        return {}
 
 
 def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
@@ -182,10 +230,14 @@ def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
     if gpath.is_file():
         merged = _deep_merge(merged, _read_toml(gpath))
         sources.append(gpath)
+        if gpath == LEGACY_GLOBAL_TOML:
+            _warn_legacy_toml(gpath, str(GLOBAL_TOML))
     ppath = _find_project_toml(start)
     if ppath is not None:
         merged = _deep_merge(merged, _read_toml(ppath))
         sources.append(ppath)
+        if ppath.name == LEGACY_PROJECT_TOML:
+            _warn_legacy_toml(ppath, PROJECT_TOML)
     return merged, sources
 
 
