@@ -7,11 +7,13 @@ host (``langstage``, ``langstage-jupyter``, ``langstage-cli``,
 """
 from .config import HostConfig, load_toml_config
 from .loader import load_agent_spec
-from .workspace import Workspace
+from .workspace import Workspace, apply_workspace, workspace_root
 
 __all__ = [
     "load_agent_spec",
     "HostConfig",
     "load_toml_config",
     "Workspace",
+    "apply_workspace",
+    "workspace_root",
 ]

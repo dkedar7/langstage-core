@@ -33,7 +33,13 @@ from .extractors import (
     TodoExtractor,
     ToolExtractor,
 )
-from .host import HostConfig, Workspace, load_agent_spec
+from .host import (
+    HostConfig,
+    Workspace,
+    apply_workspace,
+    load_agent_spec,
+    workspace_root,
+)
 from .resume import create_resume_input, prepare_agent_input
 from .tasks import (
     InMemoryTaskStore,
@@ -58,6 +64,8 @@ __all__ = [
     "load_agent_spec",
     "HostConfig",
     "Workspace",
+    "apply_workspace",
+    "workspace_root",
     # Input helpers
     "prepare_agent_input",
     "create_resume_input",

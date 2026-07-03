@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.7] - 2026-07-03
+
+### Added
+- **`apply_workspace()` / `workspace_root()` — the single workspace source of truth
+  (ADR 0005).** Core resolved `workspace_root` (the value) but never *applied* it, so
+  each surface invented its own mechanism (cli `chdir` / vscode env-push / hermes
+  backend-arg / jupyter global-mutate / web hand-sync) and three drifted into a
+  workspace bug. `apply_workspace(root, *, chdir=False)` — called once after
+  `HostConfig.resolve()` — ensures the dir exists, records it as the process's active
+  workspace, and publishes it as `LANGSTAGE_WORKSPACE_ROOT` (plus the legacy
+  `DEEPAGENT_WORKSPACE_ROOT`); `workspace_root()` is the one accessor tools and
+  surfaces read instead of a private global. `chdir` is opt-in (single-process
+  surfaces only). Surfaces migrate to it incrementally; a bring-your-own graph's
+  tools opt in by reading `workspace_root()`. Both exported top-level.
+
 ## [1.0.6] - 2026-07-03
 
 ### Added
