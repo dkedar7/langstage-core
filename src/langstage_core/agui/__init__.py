@@ -282,6 +282,11 @@ async def iter_event_frames(
     # letting renderers separate one node's output from the next (gh #43).
     current_node = "agent"
     step_nodes: list[str] = []
+    # Tool names that raised (from on_tool_error RawEvents). The AG-UI
+    # ToolCallResultEvent drops the ToolMessage status, so a failed tool otherwise
+    # renders as "success"; on_tool_error fires before the result, so we flag it by
+    # name and correct the tool_end frame. (gh #55)
+    errored_tools: dict[str, int] = {}
 
     async for ev in agent.run(run_input):
         t = type(ev).__name__
@@ -290,6 +295,12 @@ async def iter_event_frames(
             if step:
                 current_node = step
                 step_nodes.append(step)
+        elif t == "RawEvent":
+            raw = getattr(ev, "event", None) or {}
+            if raw.get("event") == "on_tool_error":
+                nm = raw.get("name")
+                if nm:
+                    errored_tools[nm] = errored_tools.get(nm, 0) + 1
         elif t == "TextMessageContentEvent":
             streamed_text = True
             yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
@@ -316,13 +327,16 @@ async def iter_event_frames(
             if len(result) > max_result_len:
                 result = result[:max_result_len] + "…(truncated)"
             name = tool_names.get(ev.tool_call_id, "tool")
+            is_error = errored_tools.get(name, 0) > 0
+            if is_error:
+                errored_tools[name] -= 1
             yield {
                 "type": "tool_end",
                 "id": ev.tool_call_id,
                 "name": name,
                 "result": result,
-                "status": "success",
-                "error_message": None,
+                "status": "error" if is_error else "success",
+                "error_message": result if is_error else None,
                 "duration_ms": None,
             }
             extractor = by_tool.get(name)
@@ -350,11 +364,18 @@ async def iter_event_frames(
                 "allowed_decisions": payload.get("allowed_decisions", allowed_decisions),
             }
         elif t == "MessagesSnapshotEvent" and not streamed_text:
-            # Non-streaming graphs deliver content in one final snapshot; map the
-            # trailing assistant messages back to the steps that produced them so a
-            # multi-node graph renders one block per node, not a run-on (gh #43).
+            # Non-streaming graphs deliver content in one final snapshot. The snapshot
+            # is the FULL thread (prior turns come from the checkpointer), so slice to
+            # what follows the last user message — otherwise the agent re-emits its
+            # entire history every turn (gh #67). Then map the trailing assistant
+            # messages back to the steps that produced them (gh #43).
+            msgs = list(ev.messages)
+            last_user = max(
+                (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
+                default=-1,
+            )
             assistant = [
-                m for m in ev.messages
+                m for m in msgs[last_user + 1:]
                 if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
             ]
             offset = max(0, len(assistant) - len(step_nodes))
@@ -444,11 +465,17 @@ async def iter_chunk_frames(
                     payload = {"action_requests": []}
             yield {"status": "interrupt", "interrupt": payload or {"action_requests": []}}
         elif t == "MessagesSnapshotEvent" and not streamed_text:
-            # Non-streaming graphs deliver content in one final snapshot; map the
-            # trailing assistant messages back to the steps that produced them so a
-            # multi-node graph renders one block per node, not a run-on (gh #43).
+            # Non-streaming graphs deliver content in one final snapshot. The snapshot
+            # is the FULL thread, so slice to what follows the last user message —
+            # otherwise the agent re-emits its whole history every turn (gh #67). Then
+            # map the trailing assistant messages back to their steps (gh #43).
+            msgs = list(ev.messages)
+            last_user = max(
+                (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
+                default=-1,
+            )
             assistant = [
-                m for m in ev.messages
+                m for m in msgs[last_user + 1:]
                 if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
             ]
             offset = max(0, len(assistant) - len(step_nodes))

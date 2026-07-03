@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.5] - 2026-07-03
+
+### Fixed
+- **Non-token-streamed agents re-rendered the entire conversation history every turn
+  (gh #67).** `iter_event_frames` / `iter_chunk_frames` emit content from the final
+  `MessagesSnapshotEvent` for agents that don't token-stream — but that snapshot is
+  the *full* thread (prior turns come from the checkpointer), so every turn re-emitted
+  turns 1..n. Now the snapshot is sliced to the messages after the last user message,
+  so only the current turn's replies are emitted. (Regression from the 1.0.4 snapshot
+  node-mapping.)
+
+### Known limitation
+- **A failed tool call can still render as `status="success"` (gh #55).** The AG-UI
+  `ToolCallResultEvent` carries no status field and its `raw_event` is empty, so the
+  `ToolMessage`'s error status is dropped before the mapping sees it. `iter_event_frames`
+  now flags a `tool_end` as an error when a preceding `on_tool_error` RawEvent named the
+  same tool (best-effort, covers raised-and-handled errors), but a tool that *returns* a
+  `status="error"` message without raising is still shown as success — that needs the
+  status carried on the AG-UI event upstream (tracked in ag-ui-langgraph).
+
 ## [1.0.4] - 2026-07-02
 
 ### Fixed
