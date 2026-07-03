@@ -37,6 +37,37 @@ async def test_iter_event_frames_shape():
     assert "event wire" in "".join(f["content"] for f in content)
 
 
+def _two_node_graph():
+    """A graph with two distinct content-emitting nodes ("first", "second")."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("first", lambda s: {"messages": [AIMessage(content="from first.")]})
+    b.add_node("second", lambda s: {"messages": [AIMessage(content="from second.")]})
+    b.add_edge(START, "first")
+    b.add_edge("first", "second")
+    b.add_edge("second", END)
+    return b.compile()
+
+
+async def test_chunk_frames_carry_real_node_names():
+    # gh #43: a multi-node graph's chunks used to all report node="agent", so the
+    # CLI (which separates output on a node change) rendered them as one run-on. The
+    # node now comes from the langgraph step, so distinct nodes are distinguishable.
+    frames = await _collect(iter_chunk_frames(build_agent(_two_node_graph()), "hi", "tn1"))
+    by_text = {f["chunk"]: f["node"] for f in frames if "chunk" in f}
+    assert by_text.get("from first.") == "first"
+    assert by_text.get("from second.") == "second"
+
+
+async def test_event_frames_carry_real_node_names():
+    frames = await _collect(iter_event_frames(build_agent(_two_node_graph()), "hi", "tn2"))
+    by_text = {f["content"]: f["node"] for f in frames if f.get("type") == "content"}
+    assert by_text.get("from first.") == "first"
+    assert by_text.get("from second.") == "second"
+
+
 async def test_iter_event_frames_runs_extractors():
     """extractors= runs a matching extractor over each tool result and emits an
     `extraction` frame (ADR 0003 Stage 1, productionized)."""

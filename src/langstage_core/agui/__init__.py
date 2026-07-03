@@ -277,12 +277,22 @@ async def iter_event_frames(
     streamed_text = False
     tool_args: dict[str, str] = {}
     tool_names: dict[str, str] = {}
+    # The langgraph node currently executing, from StepStartedEvent — so a
+    # multi-node graph's frames carry the real node instead of a fixed "agent",
+    # letting renderers separate one node's output from the next (gh #43).
+    current_node = "agent"
+    step_nodes: list[str] = []
 
     async for ev in agent.run(run_input):
         t = type(ev).__name__
-        if t == "TextMessageContentEvent":
+        if t == "StepStartedEvent":
+            step = getattr(ev, "step_name", None)
+            if step:
+                current_node = step
+                step_nodes.append(step)
+        elif t == "TextMessageContentEvent":
             streamed_text = True
-            yield {"type": "content", "content": ev.delta, "role": "assistant", "node": "agent"}
+            yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
         elif t == "ToolCallStartEvent":
             tool_names[ev.tool_call_id] = ev.tool_call_name
             tool_args[ev.tool_call_id] = ""
@@ -299,7 +309,7 @@ async def iter_event_frames(
                 "id": ev.tool_call_id,
                 "name": tool_names.get(ev.tool_call_id, "tool"),
                 "args": args,
-                "node": "agent",
+                "node": current_node,
             }
         elif t == "ToolCallResultEvent":
             result = str(getattr(ev, "content", ""))
@@ -340,9 +350,18 @@ async def iter_event_frames(
                 "allowed_decisions": payload.get("allowed_decisions", allowed_decisions),
             }
         elif t == "MessagesSnapshotEvent" and not streamed_text:
-            for m in ev.messages:
-                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None):
-                    yield {"type": "content", "content": m.content, "role": "assistant", "node": "agent"}
+            # Non-streaming graphs deliver content in one final snapshot; map the
+            # trailing assistant messages back to the steps that produced them so a
+            # multi-node graph renders one block per node, not a run-on (gh #43).
+            assistant = [
+                m for m in ev.messages
+                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
+            ]
+            offset = max(0, len(assistant) - len(step_nodes))
+            for i, m in enumerate(assistant):
+                idx = i - offset
+                node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                yield {"type": "content", "content": m.content, "role": "assistant", "node": node}
         elif t == "RunErrorEvent":
             yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
             return
@@ -387,12 +406,22 @@ async def iter_chunk_frames(
 
     streamed_text = False
     tool_buf: dict[str, dict[str, str]] = {}
+    # The langgraph node currently executing (from StepStartedEvent) so a multi-node
+    # graph's chunks carry the real node instead of a fixed "agent" — renderers use
+    # it to separate one node's output from the next (gh #43).
+    current_node = "agent"
+    step_nodes: list[str] = []
 
     async for ev in agent.run(run_input):
         t = type(ev).__name__
-        if t == "TextMessageContentEvent":
+        if t == "StepStartedEvent":
+            step = getattr(ev, "step_name", None)
+            if step:
+                current_node = step
+                step_nodes.append(step)
+        elif t == "TextMessageContentEvent":
             streamed_text = True
-            yield {"status": "streaming", "chunk": ev.delta, "node": "agent"}
+            yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
         elif t == "ToolCallStartEvent":
             tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
         elif t == "ToolCallArgsEvent":
@@ -415,9 +444,18 @@ async def iter_chunk_frames(
                     payload = {"action_requests": []}
             yield {"status": "interrupt", "interrupt": payload or {"action_requests": []}}
         elif t == "MessagesSnapshotEvent" and not streamed_text:
-            for m in ev.messages:
-                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None):
-                    yield {"status": "streaming", "chunk": m.content, "node": "agent"}
+            # Non-streaming graphs deliver content in one final snapshot; map the
+            # trailing assistant messages back to the steps that produced them so a
+            # multi-node graph renders one block per node, not a run-on (gh #43).
+            assistant = [
+                m for m in ev.messages
+                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
+            ]
+            offset = max(0, len(assistant) - len(step_nodes))
+            for i, m in enumerate(assistant):
+                idx = i - offset
+                node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                yield {"status": "streaming", "chunk": m.content, "node": node}
         elif t == "RunErrorEvent":
             yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
 

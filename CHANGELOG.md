@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.4] - 2026-07-02
+
+### Fixed
+- **AG-UI frames now carry the real langgraph node instead of a fixed `"agent"`
+  (gh #43, langstage-cli).** `iter_event_frames` / `iter_chunk_frames` hardcoded
+  `node="agent"` on every content/tool frame, so a multi-node graph's output was
+  indistinguishable — the CLI (which starts a new marker on a node change) rendered
+  two nodes' messages as one unreadable run-on. The node now tracks
+  `StepStartedEvent.step_name`, and the non-streaming `MessagesSnapshotEvent` path
+  maps trailing assistant messages back to their steps. Single-node graphs (node
+  `"agent"`) are unchanged; renderers can now separate per-node output.
+
 ## [1.0.3] - 2026-07-02
 
 ### Fixed
