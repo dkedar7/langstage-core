@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.6] - 2026-07-03
+
+### Added
+- **`langstage_core.agui.verify` / `averify` — a shared live-preflight primitive
+  (ADR 0004).** Runs ONE real turn through the AG-UI adapter (`iter_event_frames`)
+  and returns a structured `VerifyResult` (`ok` / `saw_complete` / `saw_error` /
+  `error_message` / `content_chars`). `ok` is True only if the turn *completed
+  with no error* — a missing API key, broken tool, or bad state schema fails here,
+  where a static "imports fine / loads / key is set" check gives a false green.
+  Accepts a compiled graph or an already-built `LangGraphAgent`; `verify()` is the
+  sync wrapper, `averify()` the coroutine. This is the primitive each surface's
+  `doctor`/`check`/`selfcheck`/`health` was reinventing (vscode `--selfcheck` and
+  hermes `verify` drive a real turn; cli/web/jupyter assert static state and gave
+  the false-green class in the backlog). Surfaces adopt it incrementally.
+
 ## [1.0.5] - 2026-07-03
 
 ### Fixed

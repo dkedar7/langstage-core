@@ -37,6 +37,9 @@ __all__ = [
     "ensure_available",
     "iter_event_frames",
     "iter_chunk_frames",
+    "verify",
+    "averify",
+    "VerifyResult",
     "DEFAULT_AGENT_NAME",
 ]
 
@@ -487,3 +490,8 @@ async def iter_chunk_frames(
             yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
 
     yield {"status": "complete"}
+
+
+# Imported at the bottom so verify.py can reference build_agent / iter_event_frames
+# as already-defined names (avoids a circular import). See ADR 0004.
+from .verify import VerifyResult, averify, verify  # noqa: E402,F401
