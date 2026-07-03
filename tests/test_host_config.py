@@ -216,6 +216,51 @@ class TestLangstageVocabulary:
         cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
         assert cfg.port == 8123
 
+    def test_malformed_toml_does_not_crash(self, isolated_global, tmp_path, capsys):
+        # gh #42: a broken langstage.toml must NOT crash resolve(). Config resolves
+        # at import time on several surfaces, so a raw TOMLDecodeError bricked
+        # --version / --help / --demo and even `import langstage_jupyter`. The bad
+        # file is skipped (with a visible notice); env + defaults still resolve.
+        (tmp_path / "langstage.toml").write_text("this is not = [valid toml\n")
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "7777"}, toml_start=tmp_path)
+        assert cfg.port == 7777  # env layer still applies; the bad TOML was ignored
+        err = capsys.readouterr().err
+        assert "ignoring malformed config" in err and "langstage.toml" in err
+        err.encode("cp1252")  # ASCII-only — must not crash a cp1252 console
+
+    def test_legacy_toml_warns(self, isolated_global, tmp_path):
+        # gh #25: legacy DEEPAGENT_* env warns, but a legacy deepagents.toml used to
+        # resolve silently. It now raises a DeprecationWarning too.
+        import langstage_core.host.config as config_mod
+
+        p = tmp_path / "deepagents.toml"
+        p.write_text("[server]\nport = 1234\n")
+        config_mod._warned_legacy_toml.discard(str(p))
+        with pytest.warns(DeprecationWarning, match="deepagents.toml"):
+            HostConfig.resolve(env={}, toml_start=tmp_path)
+
+    def test_legacy_toml_prints_visible_notice(self, isolated_global, tmp_path, monkeypatch, capsys):
+        import langstage_core.host.config as config_mod
+
+        p = tmp_path / "deepagents.toml"
+        p.write_text("[server]\nport = 1234\n")
+        config_mod._warned_legacy_toml.discard(str(p))
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE", raising=False)
+        HostConfig.resolve(env={}, toml_start=tmp_path)
+        err = capsys.readouterr().err
+        assert "deepagents.toml" in err and "legacy name" in err and "langstage.toml" in err
+        err.encode("cp1252")
+
+    def test_legacy_toml_notice_silent_under_pytest(self, isolated_global, tmp_path, capsys):
+        import langstage_core.host.config as config_mod
+
+        p = tmp_path / "deepagents.toml"
+        p.write_text("[server]\nport = 1234\n")
+        config_mod._warned_legacy_toml.discard(str(p))
+        HostConfig.resolve(env={}, toml_start=tmp_path)  # PYTEST_CURRENT_TEST set
+        assert "legacy name" not in capsys.readouterr().err
+
     def test_nearest_toml_wins_across_dirs(self, isolated_global, tmp_path):
         # langstage.toml in the parent must NOT beat deepagents.toml in cwd.
         (tmp_path / "langstage.toml").write_text("[server]\nport = 1000\n")
