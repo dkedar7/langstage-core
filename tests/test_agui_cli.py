@@ -26,6 +26,18 @@ def test_show_config_reflects_port_override(capsys):
     assert "[override]" in out
 
 
+def test_show_config_reflects_agent_override(capsys):
+    # gh #60: --show-config resolved without the --agent override and reported
+    # agent_spec = None while serve() honored the flag (advertised != honored).
+    # --agent is now applied before the --show-config branch, so the shown config
+    # matches the real run.
+    rc = main(["--show-config", "--agent", "my_agent.py:graph"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "my_agent.py:graph" in out
+    assert "[override]" in out
+
+
 def test_show_config_default_host_port_present(capsys):
     rc = main(["--show-config"])
     assert rc == 0
