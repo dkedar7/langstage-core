@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.2] - 2026-07-02
+
+### Fixed
+- **`langstage-agui --show-config` ignored `--agent` (gh #60).** The `--show-config`
+  branch resolved `HostConfig` with only the host/port overrides — the `--agent`
+  spec was applied later, after the early return — so `--show-config --agent X`
+  reported `agent_spec = None` while `serve()` honored the flag (advertised ≠
+  honored). The `--agent`/`--host`/`--port` overrides are now resolved once, before
+  the branch, so the shown config matches the real run. Regression-tested.
+
 ## [1.0.1] - 2026-07-02
 
 ### Fixed

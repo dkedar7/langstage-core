@@ -67,34 +67,36 @@ def main(argv: list[str] | None = None) -> int:
 
     from ..host import HostConfig
 
-    # CLI --host/--port are overrides on the resolved config so --show-config and
-    # the actual bind always agree (and env / langstage.toml host/port work).
-    host_port = {}
+    if args.demo and args.agent:
+        print("error: --demo and --agent are mutually exclusive", file=sys.stderr)
+        return 2
+
+    # CLI flags are overrides on the resolved config so --show-config and the actual
+    # bind always agree (and env / langstage.toml host/port/agent work). --agent must
+    # be applied HERE, before the --show-config branch — otherwise --show-config
+    # resolved without it and reported agent_spec = None while serving used the flag
+    # (advertised != honored). (gh #60)
+    overrides: dict = {}
     if args.host is not None:
-        host_port["host"] = args.host
+        overrides["host"] = args.host
     if args.port is not None:
-        host_port["port"] = args.port
+        overrides["port"] = args.port
+    if not args.demo:
+        overrides["agent_spec"] = args.agent
+
+    cfg = HostConfig.resolve(overrides=overrides)
 
     if args.show_config:
         # The AG-UI server consumes only agent_spec/host/port. Drop the inherited
         # workspace_root/debug/title rows so --show-config doesn't advertise env
         # vars that have no effect on this surface (same omit_keys treatment the
         # stdio sidecar and JupyterLab launcher already use). (gh #39)
-        print(
-            HostConfig.resolve(overrides=host_port).describe(
-                omit_keys=["workspace_root", "debug", "title"]
-            )
-        )
+        described = cfg.describe(omit_keys=["workspace_root", "debug", "title"])
+        if args.demo:
+            described += f"\n  demo: agent_spec resolves to {DEMO_SPEC}"
+        print(described)
         return 0
 
-    if args.demo and args.agent:
-        print("error: --demo and --agent are mutually exclusive", file=sys.stderr)
-        return 2
-
-    overrides = dict(host_port)
-    if not args.demo:
-        overrides["agent_spec"] = args.agent
-    cfg = HostConfig.resolve(overrides=overrides)
     spec: str | None = DEMO_SPEC if args.demo else cfg.agent_spec
 
     if not spec:
