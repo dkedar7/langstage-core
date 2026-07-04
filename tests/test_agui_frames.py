@@ -172,3 +172,44 @@ async def test_iter_event_frames_state_passthrough():
     frames = await _collect(iter_event_frames(agent, "hi", "tS", state={"budget": 7}))
     text = "".join(f["content"] for f in frames if f.get("type") == "content")
     assert "budget=7" in text, frames
+
+
+# The mappers dispatch on type(ev).__name__, so the fakes just need the AG-UI class
+# names + a `.delta` — name the classes exactly what ag-ui-langgraph emits.
+class ReasoningMessageContentEvent:
+    def __init__(self, delta):
+        self.delta = delta
+
+
+class TextMessageContentEvent:
+    def __init__(self, delta):
+        self.delta = delta
+
+
+class _FakeReasoningAgent:
+    """An agent whose run() emits the exact event sequence ag-ui-langgraph produces
+    for a reasoning model: reasoning deltas, then the answer text."""
+
+    async def run(self, run_input):
+        for d in ("Let me think... ", "2+2=4. "):
+            yield ReasoningMessageContentEvent(d)
+        yield TextMessageContentEvent("The answer is 4.")
+
+
+async def test_iter_event_frames_emits_reasoning():
+    # gh #71: reasoning-model chain-of-thought must surface as a `reasoning` frame,
+    # not be dropped — and stay separate from the `content` answer.
+    frames = await _collect(iter_event_frames(_FakeReasoningAgent(), "think", "tr"))
+    reasoning = [f for f in frames if f.get("type") == "reasoning"]
+    assert reasoning, frames
+    assert "".join(f["content"] for f in reasoning) == "Let me think... 2+2=4. "
+    content = [f for f in frames if f.get("type") == "content"]
+    assert "".join(f["content"] for f in content) == "The answer is 4."
+
+
+async def test_iter_chunk_frames_emits_reasoning():
+    frames = await _collect(iter_chunk_frames(_FakeReasoningAgent(), "think", "tr"))
+    reasoning = [f["reasoning"] for f in frames if "reasoning" in f]
+    assert "".join(reasoning) == "Let me think... 2+2=4. "
+    chunks = [f["chunk"] for f in frames if "chunk" in f]
+    assert "".join(chunks) == "The answer is 4."

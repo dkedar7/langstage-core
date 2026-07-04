@@ -307,6 +307,16 @@ async def iter_event_frames(
         elif t == "TextMessageContentEvent":
             streamed_text = True
             yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
+        elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
+            # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
+            # DeepSeek R1, Qwen, xAI, ...). Surface it as the advertised `reasoning`
+            # frame so renderers can show/collapse the thinking separately from the
+            # answer, instead of dropping it. Does NOT set streamed_text — reasoning
+            # isn't the answer, so a reasoning-only turn still falls back to the final
+            # snapshot for the reply. (gh #71)
+            delta = getattr(ev, "delta", "")
+            if delta:
+                yield {"type": "reasoning", "content": delta, "node": current_node}
         elif t == "ToolCallStartEvent":
             tool_names[ev.tool_call_id] = ev.tool_call_name
             tool_args[ev.tool_call_id] = ""
@@ -446,6 +456,13 @@ async def iter_chunk_frames(
         elif t == "TextMessageContentEvent":
             streamed_text = True
             yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
+        elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
+            # Reasoning-model chain-of-thought on the chunk wire — a distinct
+            # `reasoning` key (parallel to `chunk`) so renderers can style/collapse
+            # it, rather than dropping it. Not the answer, so no streamed_text. (gh #71)
+            delta = getattr(ev, "delta", "")
+            if delta:
+                yield {"status": "streaming", "reasoning": delta, "node": current_node}
         elif t == "ToolCallStartEvent":
             tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
         elif t == "ToolCallArgsEvent":
