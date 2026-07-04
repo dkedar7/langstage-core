@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.8] - 2026-07-04
+
+### Fixed
+- **`iter_event_frames` / `iter_chunk_frames` now emit the advertised `reasoning`
+  frame (gh #71).** The mappers had no branch for the `Reasoning*` / `Thinking*`
+  AG-UI events that `ag-ui-langgraph` emits for reasoning-capable models (Anthropic
+  extended thinking, OpenAI o-series, DeepSeek R1, Qwen, xAI, …), so the model's
+  chain-of-thought was silently dropped and no `reasoning` frame was ever produced —
+  contradicting the README. `ReasoningMessageContentEvent` /
+  `ThinkingTextMessageContentEvent` now map to `{"type": "reasoning", "content": …}`
+  (event wire) / `{"status": "streaming", "reasoning": …}` (chunk wire), kept
+  separate from the `content` answer so renderers can show or collapse the thinking.
+
 ## [1.0.7] - 2026-07-03
 
 ### Added
