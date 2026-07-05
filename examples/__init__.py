@@ -1,1 +1,1 @@
-"""Runnable examples for langgraph-stream-parser."""
+"""Runnable examples for langstage-core."""

@@ -1,13 +1,17 @@
 """
-FastAPI WebSocket Example using FastAPIAdapter.
+FastAPI WebSocket example — stream a LangGraph agent over a WebSocket on the AG-UI path.
 
-Demonstrates the built-in ``FastAPIAdapter`` streaming LangGraph events
-over a WebSocket with interrupt handling. The adapter is stateless —
-conversation state lives in LangGraph's checkpointer keyed by
-``session_id`` (used as ``thread_id``).
+Drives ``langstage_core.agui.iter_event_frames`` (the same typed frames the LangStage
+web UI and the VS Code sidecar render) straight over a WebSocket. Conversation state
+lives in the agent's checkpointer keyed by ``session_id`` (used as ``thread_id``), so
+reconnecting with the same id resumes the conversation.
+
+The frame vocabulary the HTML client below consumes — ``content`` / ``tool_start`` /
+``tool_end`` / ``interrupt`` / ``complete`` / ``error`` — is exactly what
+``iter_event_frames`` yields, so the client is unchanged from the pre-1.0 adapter.
 
 Requirements:
-    pip install 'langgraph-stream-parser[fastapi]' uvicorn langgraph
+    pip install "langstage-core[agui]" uvicorn langgraph
 
 Run:
     uvicorn examples.fastapi_websocket:app --reload
@@ -16,10 +20,10 @@ Then open http://localhost:8000 in your browser.
 """
 import uuid
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-from langgraph_stream_parser.adapters import FastAPIAdapter
+from langstage_core.agui import build_agent, iter_event_frames
 
 # python-dotenv is optional — only needed if you load API keys from a .env (e.g.
 # when you swap in a model-backed agent). Don't make the example crash without it.
@@ -30,18 +34,44 @@ try:
 except ImportError:
     pass
 
-from .agent import agent
+from .agent import agent as _graph
 
 
 app = FastAPI()
-adapter = FastAPIAdapter(graph=agent)
+# iter_event_frames drives an already-built AG-UI LangGraphAgent; build_agent wraps
+# any CompiledGraph into one. Build it once and reuse across every session.
+agent = build_agent(_graph, name="Example")
 
 
 @app.websocket("/ws/chat/{session_id}")
 async def websocket_chat(websocket: WebSocket, session_id: str):
-    """WebSocket endpoint. Reconnecting with the same session_id resumes
-    the conversation (state lives in the checkpointer)."""
-    await adapter.handle_websocket(websocket, session_id)
+    """WebSocket endpoint. Reconnecting with the same session_id resumes the
+    conversation (state lives in the checkpointer, keyed by session_id)."""
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            kind = data.get("type")
+            if kind == "message":
+                await websocket.send_json({"type": "ack", "ref": "message"})
+                frames = iter_event_frames(
+                    agent, data.get("content", ""), thread_id=session_id
+                )
+            elif kind == "decision":
+                # Answer an interrupt: the decisions list rides
+                # forwarded_props.command.resume -> LangGraph Command(resume=...).
+                frames = iter_event_frames(
+                    agent, "", thread_id=session_id, resume=data.get("decisions", [])
+                )
+            else:
+                await websocket.send_json(
+                    {"type": "error", "error": f"unknown message type: {kind!r}"}
+                )
+                continue
+            async for frame in frames:
+                await websocket.send_json(frame)
+    except WebSocketDisconnect:
+        return
 
 
 @app.get("/")
@@ -54,14 +84,14 @@ async def get_client():
 # The protocol: client sends
 #   {"type": "message", "content": "..."}
 #   {"type": "decision", "decisions": [{"type": "approve"}, ...]}
-# Server sends: event_to_dict(event) for each StreamEvent, plus
-#   {"type": "ack", "ref": "..."} and {"type": "error", "error": "..."}
+# Server sends: each iter_event_frames() frame (content/tool_start/tool_end/
+#   interrupt/complete/error), plus {"type": "ack", "ref": "..."}
 
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LangGraph Stream Parser - WebSocket Demo</title>
+    <title>LangStage - WebSocket Demo</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -105,7 +135,7 @@ HTML_CLIENT = """
     </style>
 </head>
 <body>
-    <h1>LangGraph Stream Parser Demo</h1>
+    <h1>LangStage Demo</h1>
     <p class="session">Session: <code>{{SESSION_ID}}</code></p>
 
     <div id="chat"></div>

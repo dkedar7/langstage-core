@@ -1,10 +1,10 @@
 """A minimal, self-contained agent for the FastAPI streaming example.
 
 Keyless and dependency-light, so the WebSocket example runs with just the
-documented install — `pip install 'langgraph-stream-parser[fastapi]' uvicorn` —
-with no API key and no extra packages. It echoes the user's message back through
-a one-node LangGraph graph compiled with a checkpointer (the adapter requires one
-for threaded per-session state).
+documented install — `pip install "langstage-core[agui]" uvicorn` — with no API
+key and no extra packages. It echoes the user's message back through a one-node
+LangGraph graph compiled with a checkpointer (iter_event_frames needs one for
+threaded per-session state).
 
 Swap in your own compiled LangGraph agent for real use — e.g. a `deepagents`
 agent with real tools and a model::
@@ -14,7 +14,7 @@ agent with real tools and a model::
     from langgraph.checkpoint.memory import InMemorySaver
     agent = create_deep_agent(name="Example", checkpointer=InMemorySaver())
 
-The adapter takes any ``CompiledGraph``.
+build_agent() / iter_event_frames() take any ``CompiledGraph``.
 """
 
 from langchain_core.messages import AIMessage
@@ -32,5 +32,5 @@ _builder.add_node("respond", respond)
 _builder.add_edge(START, "respond")
 _builder.add_edge("respond", END)
 
-# The FastAPIAdapter requires a checkpointer (threaded state per session).
+# iter_event_frames needs a checkpointer for threaded state per session.
 agent = _builder.compile(checkpointer=InMemorySaver())
