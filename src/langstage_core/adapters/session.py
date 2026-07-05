@@ -1,8 +1,7 @@
 """Session-scoped streaming adapter for web hosts.
 
-Where :class:`~langstage_core.adapters.fastapi.FastAPIAdapter` is
-request-scoped (one turn per call), ``SessionAdapter`` keeps a long-lived
-session that:
+Where a request-scoped adapter runs one turn per call, ``SessionAdapter`` keeps a
+long-lived session that:
 
 - survives client disconnects (a page refresh resumes the same session),
 - multiplexes a per-session event queue so a producer turn and out-of-band
