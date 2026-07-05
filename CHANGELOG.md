@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.9] - 2026-07-05
+
+### Fixed
+- **A relative workspace no longer doubles the agent's working directory (gh #66).**
+  `apply_workspace()` stored the root *as given* (e.g. `./ws`), and `workspace_root()`
+  re-`.resolve()`d it against the current cwd on every call — so a surface that then
+  chdir'd *into* the workspace (the cli, or the web app's `_enter_workspace`) made every
+  subsequent `workspace_root()` re-resolve `./ws` against the new cwd and double it to
+  `ws/ws`, splitting the agent's working directory from the file browser root. The root
+  is now resolved to absolute **once**, at apply time, so `workspace_root()` is idempotent
+  across a later chdir. Absolute and default (`.`) workspaces were unaffected.
+
+### Docs
+- **The two shipped `examples/` run again on a clean 1.0 install (gh #75).** Both still
+  imported symbols removed in the 1.0 rename (`FastAPIAdapter`, `JupyterDisplay`,
+  `StreamParser`) and crashed on the first line. `fastapi_websocket.py` now drives
+  `agui.iter_event_frames` over the WebSocket (the same typed frames the web UI renders;
+  the HTML client is unchanged), and `jupyter_example.ipynb` was rewritten around
+  `agui.iter_chunk_frames`. Both run keyless. Also dropped the stale `FastAPIAdapter`
+  cross-reference in `SessionAdapter`'s docstring.
+
 ## [1.0.8] - 2026-07-04
 
 ### Fixed

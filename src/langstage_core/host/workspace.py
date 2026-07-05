@@ -76,9 +76,15 @@ def apply_workspace(root, *, chdir: bool = False) -> "Workspace":
     Returns the :class:`Workspace`.
     """
     global _ACTIVE
-    ws = Workspace(root).ensure()
+    # Resolve to absolute ONCE, here, before storing — so the active root is
+    # immune to a later chdir. workspace_root() returns _ACTIVE.root.resolve();
+    # if the stored root were relative (e.g. "./ws"), a surface that then chdirs
+    # *into* the workspace (cli / the web app's _enter_workspace) would make every
+    # subsequent workspace_root() re-resolve "./ws" against the new cwd and double
+    # it to ws/ws — splitting the agent's cwd from the file browser root (#66).
+    ws = Workspace(Path(root).resolve()).ensure()
     _ACTIVE = ws
-    resolved = str(ws.root.resolve())
+    resolved = str(ws.root)
     os.environ[_ENV_CANONICAL] = resolved
     os.environ[_ENV_LEGACY] = resolved
     if chdir:

@@ -17,14 +17,27 @@ from langstage_core.host import workspace as ws_mod
 @pytest.fixture(autouse=True)
 def _isolate_active_workspace(monkeypatch, tmp_path):
     """apply_workspace sets PROCESS-global state (a module global + env + maybe cwd).
-    Snapshot and restore it around each test so invocations stay isolated."""
+    Snapshot and restore it around each test so invocations stay isolated.
+
+    NB: we snapshot/restore the workspace env vars by hand rather than via
+    monkeypatch.delenv — because apply_workspace *sets* them during the test, and
+    monkeypatch.delenv(raising=False) on an already-absent key records nothing to
+    restore, so the value would leak into the next file (it broke test_host's
+    from_env under non-alphabetical test ordering)."""
     monkeypatch.chdir(tmp_path)  # a safe cwd; monkeypatch restores the real one
     saved_active = ws_mod._ACTIVE
     monkeypatch.setattr(ws_mod, "_ACTIVE", None)
-    monkeypatch.delenv("LANGSTAGE_WORKSPACE_ROOT", raising=False)
-    monkeypatch.delenv("DEEPAGENT_WORKSPACE_ROOT", raising=False)
+    env_keys = ("LANGSTAGE_WORKSPACE_ROOT", "DEEPAGENT_WORKSPACE_ROOT")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    for k in env_keys:
+        os.environ.pop(k, None)
     yield
     ws_mod._ACTIVE = saved_active
+    for k, v in saved_env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def test_apply_workspace_publishes_the_source_of_truth(tmp_path):
@@ -64,3 +77,20 @@ def test_in_process_active_beats_stale_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LANGSTAGE_WORKSPACE_ROOT", str(tmp_path / "stale"))
     apply_workspace(tmp_path / "current")
     assert workspace_root() == (tmp_path / "current").resolve()
+
+
+def test_relative_workspace_is_idempotent_across_a_later_chdir(tmp_path, monkeypatch):
+    """apply_workspace() must resolve a RELATIVE root to absolute up front, so a
+    surface that later chdirs *into* the workspace (cli, the web app's
+    _enter_workspace) doesn't make workspace_root() re-resolve "./ws" against the
+    new cwd and double it to ws/ws — the #66 split-brain.
+    """
+    monkeypatch.chdir(tmp_path)
+    apply_workspace(Path("./ws"))  # relative, exactly as the README Quickstart passes
+    expected = (tmp_path / "ws").resolve()
+    assert workspace_root() == expected
+
+    # Simulate _enter_workspace()/apply_workspace(chdir=True): move the process cwd
+    # into the workspace, then read again. It must NOT double.
+    os.chdir(workspace_root())
+    assert workspace_root() == expected  # was tmp_path/ws/ws before the fix
