@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.10] - 2026-07-06
+
+### Fixed
+- **The standard HumanInterrupt shape no longer crashes an interrupt turn (gh
+  langstage-vscode #40).** The `on_interrupt` handler in `iter_event_frames` /
+  `iter_chunk_frames` assumed the interrupt value was a dict keyed `action_requests`
+  and did `payload.get(...)` — so the **list of HumanInterrupt dicts** that deepagents /
+  langchain HITL actually emit (`[{"action_request": {...}, "config": {...}}, ...]`)
+  raised `'list' object has no attribute 'get'` and failed the turn, while any other
+  plain dict returned an empty `action_requests` (the advertised field never populated).
+  A shared `_normalize_interrupt` now handles all three shapes: the HumanInterrupt list
+  (unwrapping each `action_request` and deriving `allowed_decisions` from the `config`
+  flags), our own `action_requests`-keyed dict, and a plain dict (surfaced as a single
+  action request). Fixes the crash on every surface — the vscode sidecar and web
+  (`iter_event_frames`) and the cli (which reads `frame["interrupt"]["action_requests"]`
+  off `iter_chunk_frames` and would otherwise hit the same list crash).
+
 ## [1.0.9] - 2026-07-05
 
 ### Fixed
