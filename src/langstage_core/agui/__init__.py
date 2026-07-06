@@ -228,6 +228,63 @@ def serve(
     uvicorn.run(app, host=host, port=port)
 
 
+_DEFAULT_DECISIONS = ["reject", "edit", "respond", "approve"]
+
+# HumanInterrupt.config key -> the decision it permits (the deepagents / langchain
+# HITL convention). Used to derive allowed_decisions from a HumanInterrupt list.
+_CONFIG_DECISION = {
+    "allow_accept": "approve",
+    "allow_edit": "edit",
+    "allow_respond": "respond",
+    "allow_ignore": "reject",
+}
+
+
+def _normalize_interrupt(payload, default_decisions=_DEFAULT_DECISIONS):
+    """Normalize a langgraph interrupt value to ``(action_requests, review_configs,
+    allowed_decisions)``, tolerating the shapes real agents actually produce.
+
+    The on_interrupt handler used to assume the value was a dict keyed
+    ``action_requests``/``allowed_decisions`` and did ``payload.get(...)`` — which
+    crashed on the **standard HumanInterrupt list** that deepagents / langchain HITL
+    emit (``'list' object has no attribute 'get'``) and returned an empty
+    ``action_requests`` for any other dict (gh langstage-vscode #40). Handled shapes:
+
+    - a **list of HumanInterrupt dicts** —
+      ``[{"action_request": {...}, "config": {...}, "description": ...}, ...]`` — the
+      deepagents / langchain convention: each ``action_request`` becomes an action
+      request, and ``config``'s ``allow_*`` flags derive the allowed decisions;
+    - a dict **already keyed** ``action_requests`` (our own shape) — used as-is;
+    - any other **plain dict** — treated as a single action request (so a
+      ``interrupt({...})`` value surfaces instead of vanishing to ``[]``).
+    """
+    if isinstance(payload, list):
+        action_requests = []
+        allowed: set = set()
+        for item in payload:
+            if isinstance(item, dict):
+                action_requests.append(item.get("action_request", item))
+                cfg = item.get("config")
+                if isinstance(cfg, dict):
+                    allowed.update(
+                        dec for key, dec in _CONFIG_DECISION.items() if cfg.get(key)
+                    )
+            else:
+                action_requests.append(item)
+        decisions = [d for d in default_decisions if d in allowed] or list(default_decisions)
+        return action_requests, [], decisions
+    if isinstance(payload, dict):
+        if "action_requests" in payload:
+            return (
+                payload.get("action_requests", []),
+                payload.get("review_configs", []),
+                payload.get("allowed_decisions", default_decisions),
+            )
+        if payload:  # a plain dict interrupt value -> a single action request
+            return [payload], [], list(default_decisions)
+    return [], [], list(default_decisions)
+
+
 async def iter_event_frames(
     agent: Any,
     message: str,
@@ -369,12 +426,14 @@ async def iter_event_frames(
                     payload = json.loads(payload)
                 except json.JSONDecodeError:
                     payload = {}
-            payload = payload or {}
+            action_requests, review_configs, decisions = _normalize_interrupt(
+                payload, allowed_decisions
+            )
             yield {
                 "type": "interrupt",
-                "action_requests": payload.get("action_requests", []),
-                "review_configs": payload.get("review_configs", []),
-                "allowed_decisions": payload.get("allowed_decisions", allowed_decisions),
+                "action_requests": action_requests,
+                "review_configs": review_configs,
+                "allowed_decisions": decisions,
             }
         elif t == "MessagesSnapshotEvent" and not streamed_text:
             # Non-streaming graphs deliver content in one final snapshot. The snapshot
@@ -482,8 +541,19 @@ async def iter_chunk_frames(
                 try:
                     payload = json.loads(payload)
                 except json.JSONDecodeError:
-                    payload = {"action_requests": []}
-            yield {"status": "interrupt", "interrupt": payload or {"action_requests": []}}
+                    payload = {}
+            # Normalize to a dict with action_requests so a chunk-wire consumer
+            # (cli: interrupt_data.get("action_requests")) doesn't crash on the
+            # standard HumanInterrupt *list* shape and gets a populated request. (#40)
+            action_requests, review_configs, decisions = _normalize_interrupt(payload)
+            yield {
+                "status": "interrupt",
+                "interrupt": {
+                    "action_requests": action_requests,
+                    "review_configs": review_configs,
+                    "allowed_decisions": decisions,
+                },
+            }
         elif t == "MessagesSnapshotEvent" and not streamed_text:
             # Non-streaming graphs deliver content in one final snapshot. The snapshot
             # is the FULL thread, so slice to what follows the last user message —
