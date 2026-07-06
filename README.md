@@ -6,7 +6,7 @@
 
 The shared core behind the **[LangStage](https://github.com/dkedar7/langstage) family**: a host layer for LangGraph agents (spec-loading + layered config), an in-process **AG-UI** bridge that streams any `CompiledGraph` to a frontend, an async task-delegation engine, and interrupt-aware input helpers. Write your agent once — any LangGraph `CompiledGraph` — and every LangStage surface runs it the same way.
 
-> **1.0 — renamed from `langgraph-stream-parser`.** The old `StreamParser` / `events` / `event_to_dict` event layer was retired in favor of the AG-UI wire (see [Migrating](#migrating-from-langgraph-stream-parser) and [ADR 0003](docs/adr/0003-deprecate-the-event-layer.md)). The old import name still works via a compat shim.
+> **1.0 — renamed from `langgraph-stream-parser`.** The old `StreamParser` / `events` / `event_to_dict` event layer was retired in favor of the AG-UI wire (see [Migrating](#migrating-from-langgraph-stream-parser) and [ADR 0003](docs/adr/0003-deprecate-the-event-layer.md)). The old `import langgraph_stream_parser` keeps working **as long as the separate `langgraph-stream-parser` compat package stays installed** (it re-exports `langstage_core`); a fresh install of `langstage-core` alone does not provide it.
 
 ## Every stage for your LangGraph agent
 
@@ -121,7 +121,10 @@ python -m langstage_core.host      # or each surface's --show-config
 
 ## Migrating from langgraph-stream-parser
 
-`langstage-core` **1.0** is the rename of `langgraph-stream-parser`. Importing the old name still works via a compat shim that re-exports `langstage_core` (with a `DeprecationWarning`), so `import langgraph_stream_parser` and its submodules keep resolving — but update to `import langstage_core` when convenient.
+`langstage-core` **1.0** is the rename of `langgraph-stream-parser`. The old import name keeps working **through a separate compat package** — `langgraph-stream-parser` 1.0, which now just re-exports `langstage_core` (with a `DeprecationWarning`). So `import langgraph_stream_parser` and its submodules keep resolving **only while that package remains installed**:
+
+- **Upgrading in place** (`pip install -U langgraph-stream-parser`) → you keep the shim package, so the old import keeps working. Update to `import langstage_core` when convenient.
+- **Installing `langstage-core` fresh** does **not** pull the shim (it's a separate distribution, and depending on it would be circular). Either `import langstage_core` (recommended), or `pip install langgraph-stream-parser` alongside if you need the old name during a transition.
 
 The **event layer was removed** in 1.0. If you used it directly, migrate:
 
