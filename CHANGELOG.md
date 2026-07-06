@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.11] - 2026-07-06
+
+### Docs
+- **The README no longer over-promises the `langgraph_stream_parser` compat shim (gh
+  #77).** The banner and migration guide said the old import "still works via a compat
+  shim," which read as "install `langstage-core` and `import langgraph_stream_parser`
+  keeps working" — but the shim is a **separate** distribution (`langgraph-stream-parser`
+  1.0, which re-exports `langstage_core`) that `langstage-core` neither bundles nor
+  depends on (depending on it would be circular). So a fresh `pip install langstage-core`
+  hit `ModuleNotFoundError` on the old import. The README now states the old name keeps
+  working only while the separate `langgraph-stream-parser` package stays installed
+  (kept on an in-place upgrade; add it explicitly, or just `import langstage_core`, on a
+  fresh install).
+
 ## [1.0.10] - 2026-07-06
 
 ### Fixed
