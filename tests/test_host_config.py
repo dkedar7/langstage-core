@@ -104,6 +104,19 @@ class TestIntrospection:
         # keys it DOES honor are still shown
         assert "agent_spec" in trimmed and "workspace_root" in trimmed
 
+    def test_describe_renders_the_configurable_table(self, isolated_global, tmp_path):
+        # The complete config diagnostic — including the [configurable] table — comes
+        # from this one method, so every surface's --show-config / /config render it
+        # identically instead of bolting it on separately and drifting (gh #66 class).
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        # no configurable -> no section
+        assert "LangGraph configurable" not in cfg.describe()
+        # a configurable table is rendered under the dump
+        text = cfg.describe(configurable={"model_name": "gpt-4o-mini", "temperature": "0.2"})
+        assert "LangGraph configurable:" in text
+        assert "model_name: gpt-4o-mini" in text
+        assert "temperature: 0.2" in text
+
 
 class TestSubclass:
     def test_subclass_adds_keys_to_same_chain(self, isolated_global, tmp_path):

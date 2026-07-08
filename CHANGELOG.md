@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.14] - 2026-07-08
+
+### Changed
+- **`HostConfig.describe()` is now the single, complete config diagnostic — it renders the
+  `[configurable]` table too (new `configurable=` arg).** A run of nightly issues
+  (#55/#57/#61/#64/#66) were all "config-diagnostic drift": each surface assembled its own
+  `--show-config` / interactive `/config` output (base dump + a separately-rendered
+  `[configurable]` table + footer tweaks), and the pieces drifted. Folding the
+  `[configurable]` table into `describe()` means the whole diagnostic comes from one method,
+  so every surface's two config views render identically by construction. Purely additive —
+  callers that don't pass `configurable` are unchanged.
+
 ## [1.0.13] - 2026-07-08
 
 ### Fixed
