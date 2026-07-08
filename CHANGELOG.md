@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.13] - 2026-07-08
+
+### Fixed
+- **`create_resume_input(...)` no longer double-wraps under `iter_event_frames` /
+  `iter_chunk_frames`, crashing HITL resume (gh #82).** `create_resume_input()` returns a
+  LangGraph `Command`, but the iterators' `resume=` builds the `Command` themselves
+  (`forwarded_props.command.resume`), so passing the helper's output produced
+  `Command(resume=Command(...))` — the graph's `interrupt()` then returned the inner
+  `Command` and a realistic HITL node crashed with `'Command' object is not subscriptable`.
+  The iterators now unwrap a `Command`'s `.resume`, so **both** `resume=create_resume_input(...)`
+  and a raw `resume={"decisions": [...]}` converge on a single, correct wrap. Also refreshed
+  `create_resume_input`'s docstring (its examples used the removed `StreamParser.parse` API).
+- **A malformed TOML config is no longer listed as "read", and its warning prints once
+  (gh langstage-hermes #61).** `_read_toml` caught a `TOMLDecodeError`, returned `{}`, and
+  warned — but `load_toml_config` still appended the file to `sources` (so `--show-config`
+  printed `TOML read from: <it>`, contradicting the "ignoring malformed" note), and the note
+  was emitted twice (the loader plus the source-labeling re-read each warned). `_read_toml`
+  now records malformed paths and dedupes the warning; loaders skip listing a malformed file.
+
 ## [1.0.12] - 2026-07-07
 
 ### Fixed

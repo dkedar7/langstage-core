@@ -285,6 +285,29 @@ def _normalize_interrupt(payload, default_decisions=_DEFAULT_DECISIONS):
     return [], [], list(default_decisions)
 
 
+def _unwrap_resume(resume):
+    """Return the raw resume payload, accepting either the payload OR a langgraph
+    ``Command`` built by :func:`create_resume_input`.
+
+    ``iter_event_frames`` / ``iter_chunk_frames`` wrap ``resume`` into
+    ``forwarded_props.command.resume``, which ag-ui-langgraph turns into
+    ``Command(resume=...)``. But ``create_resume_input()`` *also* returns a
+    ``Command``, so passing it straight through double-wrapped it — the graph's
+    ``interrupt()`` then returned the inner ``Command`` instead of the decision and
+    a realistic HITL node crashed with ``'Command' object is not subscriptable``
+    (gh #82). If the caller already built a ``Command``, use its ``.resume`` value so
+    both ``resume=create_resume_input(...)`` and a raw ``resume={"decisions": ...}``
+    converge on the same single wrap.
+    """
+    if resume is None:
+        return None
+    try:
+        from langgraph.types import Command
+    except ImportError:  # pragma: no cover - langgraph is always present in practice
+        return resume
+    return resume.resume if isinstance(resume, Command) else resume
+
+
 async def iter_event_frames(
     agent: Any,
     message: str,
@@ -323,6 +346,7 @@ async def iter_event_frames(
 
     allowed_decisions = ["reject", "edit", "respond", "approve"]
     by_tool = {e.tool_name: e for e in extractors}
+    resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
         thread_id=thread_id,
@@ -486,6 +510,7 @@ async def iter_chunk_frames(
     import json
     import uuid
 
+    resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
         thread_id=thread_id,
