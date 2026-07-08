@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.12] - 2026-07-07
+
+### Fixed
+- **`from langstage_core import SessionAdapter` / `Session` now works, matching the docs
+  (gh #80).** The README's "What's in the box" says everything is re-exported at the top
+  level (except the AG-UI helpers), and lists `SessionAdapter` / `Session` — but they were
+  only importable from `langstage_core.adapters`, so the documented top-level import raised
+  `ImportError`. They are now re-exported at the top level (still available under
+  `langstage_core.adapters` too). Also corrected the package docstring, which had
+  miscategorized `SessionAdapter` under the `agui` bullet (implying
+  `from langstage_core.agui import SessionAdapter`, which never worked).
+
 ## [1.0.11] - 2026-07-06
 
 ### Docs

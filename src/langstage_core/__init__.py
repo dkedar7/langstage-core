@@ -8,8 +8,10 @@ AG-UI adapter instead. What remains is the *durable* core —
   - **host**: ``load_agent_spec`` + ``HostConfig`` + ``Workspace`` (write once,
     run on every surface with the same spec string and ``langstage.toml`` config).
   - **agui**: ``build_agent`` + ``iter_event_frames`` / ``iter_chunk_frames``
-    (the in-process AG-UI stream, with an ``extractors=`` hook), ``build_app`` /
-    ``serve`` for the wire, and ``SessionAdapter`` for session-scoped streaming.
+    (the in-process AG-UI stream, with an ``extractors=`` hook), and ``build_app`` /
+    ``serve`` for the wire. (These live under ``langstage_core.agui``, not top-level.)
+  - **adapters**: ``SessionAdapter`` / ``Session`` for session-scoped streaming
+    (also re-exported at the top level).
   - **tasks**: the durable task-delegation engine.
   - **extractors**: the ``ToolExtractor`` protocol + reusable built-ins.
 
@@ -33,6 +35,7 @@ from .extractors import (
     TodoExtractor,
     ToolExtractor,
 )
+from .adapters import Session, SessionAdapter
 from .host import (
     HostConfig,
     Workspace,
@@ -66,6 +69,9 @@ __all__ = [
     "Workspace",
     "apply_workspace",
     "workspace_root",
+    # Session-scoped streaming adapter (also under langstage_core.adapters)
+    "SessionAdapter",
+    "Session",
     # Input helpers
     "prepare_agent_input",
     "create_resume_input",
