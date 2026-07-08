@@ -109,6 +109,13 @@ def _print_legacy_env_notice(legacy: str, canonical: str) -> None:
 
 _warned_legacy_toml: set[str] = set()
 
+# Paths whose TOML parse failed. Callers (loaders, --show-config) consult this so a
+# malformed/ignored file is never listed as "read" (gh langstage-hermes #61).
+_malformed_toml: set[str] = set()
+# Dedupe the "ignoring malformed config" notice — _read_toml is called more than once
+# per path (loader + the per-file source-labeling re-read), which double-warned (#61).
+_warned_malformed_toml: set[str] = set()
+
 
 def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
     """Visible deprecation notice when a legacy-named TOML file is resolved
@@ -195,19 +202,25 @@ def _read_toml(path: Path) -> dict:
     # Windows, and `tomllib.load()` (binary) chokes on it with a cryptic
     # "Invalid statement (at line 1, column 1)" — which, because jupyter's
     # config resolves at import time, bricked the whole extension. (gh #-dogfood)
+    key = str(path)
     try:
-        return _tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        data = _tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        _malformed_toml.discard(key)  # a file that previously failed now parses
+        return data
     except Exception as exc:  # noqa: BLE001 — a broken config must not brick every entrypoint
         # Several surfaces resolve config at import time, so a raw TOMLDecodeError
         # (or an unreadable file) here would kill --version / --help / --demo,
         # `import langstage_jupyter`, and the server extension — not just the command
-        # that needs the config. Skip the bad file with a visible one-line notice and
-        # fall back to env + defaults. ASCII-only (cp1252-safe). (gh #42)
-        print(
-            f"note: ignoring malformed config {path} "
-            f"({type(exc).__name__}: {exc}); using environment + defaults instead.",
-            file=sys.stderr,
-        )
+        # that needs the config. Skip the bad file, record it as malformed so it isn't
+        # later listed as "read", and warn ONCE (ASCII-only, cp1252-safe). (gh #42, #61)
+        _malformed_toml.add(key)
+        if key not in _warned_malformed_toml:
+            print(
+                f"note: ignoring malformed config {path} "
+                f"({type(exc).__name__}: {exc}); using environment + defaults instead.",
+                file=sys.stderr,
+            )
+            _warned_malformed_toml.add(key)
         return {}
 
 
@@ -229,15 +242,17 @@ def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
     gpath = _global_toml_path()
     if gpath.is_file():
         merged = _deep_merge(merged, _read_toml(gpath))
-        sources.append(gpath)
-        if gpath == LEGACY_GLOBAL_TOML:
-            _warn_legacy_toml(gpath, str(GLOBAL_TOML))
+        if str(gpath) not in _malformed_toml:  # don't list an ignored file as read (#61)
+            sources.append(gpath)
+            if gpath == LEGACY_GLOBAL_TOML:
+                _warn_legacy_toml(gpath, str(GLOBAL_TOML))
     ppath = _find_project_toml(start)
     if ppath is not None:
         merged = _deep_merge(merged, _read_toml(ppath))
-        sources.append(ppath)
-        if ppath.name == LEGACY_PROJECT_TOML:
-            _warn_legacy_toml(ppath, PROJECT_TOML)
+        if str(ppath) not in _malformed_toml:
+            sources.append(ppath)
+            if ppath.name == LEGACY_PROJECT_TOML:
+                _warn_legacy_toml(ppath, PROJECT_TOML)
     return merged, sources
 
 

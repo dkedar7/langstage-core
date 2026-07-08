@@ -14,8 +14,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import interrupt
 
+from langstage_core import create_resume_input
 from langstage_core.agui import (
     _normalize_interrupt,
+    _unwrap_resume,
     build_agent,
     iter_chunk_frames,
     iter_event_frames,
@@ -109,3 +111,54 @@ def test_iter_chunk_frames_surfaces_human_interrupt_without_crashing():
     assert interrupts[0]["interrupt"]["action_requests"] == [
         {"action": "delete_file", "args": {"path": "/tmp/x"}}
     ]
+
+
+# ── resume: create_resume_input()'s Command must not double-wrap (gh #82) ──
+
+
+def test_unwrap_resume_accepts_command_and_raw_payload():
+    cmd = create_resume_input(decisions=[{"type": "approve"}])
+    # a Command is unwrapped to its .resume payload...
+    assert _unwrap_resume(cmd) == {"decisions": [{"type": "approve"}]}
+    # ...and a raw payload passes through untouched; None stays None.
+    raw = {"decisions": [{"type": "approve"}]}
+    assert _unwrap_resume(raw) is raw
+    assert _unwrap_resume(None) is None
+
+
+def _decision_reading_agent():
+    """A realistic HITL node that reads the resume decision as a mapping — it crashes
+    (`'Command' object is not subscriptable`) if resume was double-wrapped (gh #82)."""
+    def act(state):
+        decision = interrupt([{"action_request": {"action": "delete", "args": {}},
+                               "config": {"allow_accept": True}}])
+        choice = decision["decisions"][0]["type"]
+        return {"messages": [AIMessage(content=f"chose: {choice}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("act", act)
+    b.add_edge(START, "act")
+    b.add_edge("act", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+def _resume_roundtrip(thread_id, resume):
+    agent = build_agent(_decision_reading_agent(), name="HITL")
+    asyncio.run(_collect(iter_event_frames(agent, "go", thread_id)))  # hit the interrupt
+    return asyncio.run(_collect(iter_event_frames(agent, "", thread_id, resume=resume)))
+
+
+def test_resume_with_create_resume_input_command_does_not_double_wrap():
+    # The exact #82 repro: resume= create_resume_input(...) (a Command) used to
+    # double-wrap and crash the HITL node.
+    frames = _resume_roundtrip("r-cmd", create_resume_input(decisions=[{"type": "accept"}]))
+    assert not any(f.get("type") == "error" for f in frames), frames
+    content = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
+    assert "chose: accept" in content
+
+
+def test_resume_with_raw_payload_still_works():
+    frames = _resume_roundtrip("r-raw", {"decisions": [{"type": "accept"}]})
+    assert not any(f.get("type") == "error" for f in frames), frames
+    content = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
+    assert "chose: accept" in content

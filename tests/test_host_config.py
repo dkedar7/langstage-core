@@ -228,6 +228,27 @@ class TestLangstageVocabulary:
         assert "ignoring malformed config" in err and "langstage.toml" in err
         err.encode("cp1252")  # ASCII-only — must not crash a cp1252 console
 
+    def test_malformed_toml_not_listed_as_read_and_warns_once(
+        self, isolated_global, tmp_path, monkeypatch, capsys
+    ):
+        # gh langstage-hermes #61: a malformed file was appended to `sources`
+        # (so --show-config printed "TOML read from: <it>", contradicting the
+        # "ignoring malformed" note) and the note was emitted twice (the loader plus
+        # the source-labeling re-read each warned).
+        import langstage_core.host.config as config_mod
+
+        p = tmp_path / "langstage.toml"
+        p.write_text("[ok]\nx = 1\n[oops\n")  # line 3: unterminated table header
+        config_mod._malformed_toml.discard(str(p))
+        config_mod._warned_malformed_toml.discard(str(p))
+        monkeypatch.chdir(tmp_path)
+
+        merged, sources = config_mod.load_toml_config(start=tmp_path)
+        config_mod._read_toml(p)  # a second read (as --show-config source-labeling does)
+
+        assert p not in sources, "an ignored/malformed file must not be listed as read"
+        assert capsys.readouterr().err.count("ignoring malformed config") == 1
+
     def test_legacy_toml_warns(self, isolated_global, tmp_path):
         # gh #25: legacy DEEPAGENT_* env warns, but a legacy deepagents.toml used to
         # resolve silently. It now raises a DeprecationWarning too.

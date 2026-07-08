@@ -25,24 +25,27 @@ def create_resume_input(
             simple confirmation.
 
     Returns:
-        A LangGraph Command object ready to pass to graph.stream().
+        A LangGraph ``Command``. Pass it to the 1.0 streaming path via
+        ``iter_event_frames``/``iter_chunk_frames``'s ``resume=`` (they accept
+        either this ``Command`` or the raw resume payload — gh #82), or to
+        ``graph.stream(...)`` directly.
 
     Raises:
         ValueError: If neither decisions nor value is provided,
             or if both are provided.
 
     Example:
-        # Resume with approval decisions
-        resume_input = create_resume_input(
-            decisions=[{"type": "approve"}]
-        )
-        for event in parser.parse(graph.stream(resume_input, config=config)):
-            handle_event(event)
+        # Resume an interrupt over the 1.0 AG-UI streaming path:
+        from langstage_core.agui import iter_event_frames
+        resume = create_resume_input(decisions=[{"type": "approve"}])
+        async for frame in iter_event_frames(agent, "", thread_id, resume=resume):
+            handle(frame)
 
-        # Resume with simple value
-        resume_input = create_resume_input(value=True)
-        for event in parser.parse(graph.stream(resume_input, config=config)):
-            handle_event(event)
+        # A raw payload works too — resume={"decisions": [{"type": "approve"}]}.
+
+        # Or resume a bare graph.stream() directly (a Command is what it expects):
+        for event in graph.stream(resume, config=config):
+            ...
     """
     if decisions is None and value is None:
         raise ValueError("Must provide either 'decisions' or 'value'")
