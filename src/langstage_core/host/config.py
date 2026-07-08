@@ -423,7 +423,11 @@ class HostConfig:
         """Per-field origin from the last ``resolve()`` (field -> source)."""
         return getattr(self, "_sources", {})
 
-    def describe(self, omit_keys: list[str] | None = None) -> str:
+    def describe(
+        self,
+        omit_keys: list[str] | None = None,
+        configurable: dict | None = None,
+    ) -> str:
         """Human-readable dump: value, source, and the env var / TOML key.
 
         This is what ``python -m langstage_core.host`` prints.
@@ -432,6 +436,13 @@ class HostConfig:
         honor — e.g. a stdio-only sidecar passes ``omit_keys=["host", "port"]``
         so ``--show-config`` never advertises an env var (with a confident
         source attribution) that has zero effect on that surface.
+
+        ``configurable`` is the resolved ``[configurable]`` TOML table (the keys
+        forwarded to the graph's ``config["configurable"]``). It is rendered here so
+        the COMPLETE config diagnostic comes from this one method — every surface's
+        ``--show-config`` and interactive ``/config`` render it identically instead of
+        each bolting the table on separately and drifting (the recurring gh #55/#57/
+        #61/#64/#66 "config-diagnostic drift" class).
         """
         omit = set(omit_keys or ())
         env_map = type(self)._env_map()
@@ -460,6 +471,14 @@ class HostConfig:
             lines.append("  TOML read from: " + ", ".join(str(p) for p in toml_paths))
         else:
             lines.append("  TOML: no langstage.toml (or legacy deepagents.toml) found")
+        if configurable:
+            lines.append("")
+            lines.append("  LangGraph configurable:")
+            for k, v in configurable.items():
+                v_str = str(v)
+                if len(v_str) > 50:
+                    v_str = v_str[:50] + "..."
+                lines.append(f"    {k}: {v_str}")
         return "\n".join(lines)
 
 
