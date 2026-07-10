@@ -58,10 +58,16 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     agent, data.get("content", ""), thread_id=session_id
                 )
             elif kind == "decision":
-                # Answer an interrupt: the decisions list rides
-                # forwarded_props.command.resume -> LangGraph Command(resume=...).
+                # Answer an interrupt. The resume value rides
+                # forwarded_props.command.resume -> LangGraph Command(resume=...),
+                # and the HITL middleware reads it back as interrupt(...)["decisions"] —
+                # so it must be the decision ENVELOPE (a dict with a "decisions" list),
+                # NOT a bare list. A bare list crashes a real HITL agent with
+                # `TypeError: list indices must be integers or slices, not str` (gh #87,
+                # the same shape create_resume_input() builds and the README documents).
                 frames = iter_event_frames(
-                    agent, "", thread_id=session_id, resume=data.get("decisions", [])
+                    agent, "", thread_id=session_id,
+                    resume={"decisions": data.get("decisions", [])},
                 )
             else:
                 await websocket.send_json(

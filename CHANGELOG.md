@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.16] - 2026-07-10
+
+### Fixed
+- **`examples/fastapi_websocket.py` resumed an interrupt with a bare list, crashing a real
+  HITL agent — the same bug as #85, missed in the FastAPI example (gh #87).** The `decision`
+  branch forwarded the client's bare `decisions` list straight into `resume=[...]`, but the
+  HITL middleware reads it back as `interrupt(...)["decisions"]`, so a real deepagents/HITL
+  agent (the swap-in the example invites) crashed with `TypeError: list indices must be
+  integers or slices, not str` on the first Approve. The example now wraps it in the decision
+  envelope `resume={"decisions": [...]}`, matching the README, the Jupyter example (#86), and
+  `create_resume_input`. The `tests/test_example_docs.py` guard now scans **every**
+  `examples/*.py` file too — not just the notebook + README — so no shipped surface can
+  regress to the bare list again.
+
 ## [1.0.15] - 2026-07-09
 
 ### Fixed
