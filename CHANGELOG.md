@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.15] - 2026-07-09
+
+### Fixed
+- **The Jupyter example notebook's HITL resume snippet used a bare list, which crashes the
+  middleware (gh #85).** `examples/jupyter_example.ipynb` showed
+  `resume=[{"type": "approve"}]`, but `HumanInTheLoopMiddleware` reads the resumed value back
+  as `interrupt(...)["decisions"]` — a list has no `["decisions"]`, so copy-pasting the
+  snippet crashed the resume. Corrected to the **decision envelope**
+  `resume={"decisions": [{"type": "approve"}]}` (the same shape `create_resume_input(...)`
+  builds and the README already documents). A new `tests/test_example_docs.py` pins the
+  notebook and README to the envelope form — it forbids a bare-list `resume=` in either and
+  ties the documented literal to `create_resume_input(...)`'s output so they can't drift.
+
 ## [1.0.14] - 2026-07-08
 
 ### Changed
