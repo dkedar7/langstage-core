@@ -213,3 +213,176 @@ async def test_iter_chunk_frames_emits_reasoning():
     assert "".join(reasoning) == "Let me think... 2+2=4. "
     chunks = [f["chunk"] for f in frames if "chunk" in f]
     assert "".join(chunks) == "The answer is 4."
+
+
+# --- gh #89: mixed-mode turn (an earlier node streams, a later node returns a
+# finished, non-streamed AIMessage) must render both, not silently drop the finished
+# message once anything streamed. ---
+
+def _streaming_model():
+    """A keyless, deterministic BaseChatModel that streams tokens ("hi from model")."""
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, AIMessageChunk
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+
+    class Streamer(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "streamer"
+
+        def _generate(self, messages, stop=None, run_manager=None, **k):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="hi from model"))])
+
+        def _stream(self, messages, stop=None, run_manager=None, **k):
+            for tok in ("hi ", "from ", "model"):
+                ch = ChatGenerationChunk(message=AIMessageChunk(content=tok))
+                if run_manager:
+                    run_manager.on_llm_new_token(tok, chunk=ch)
+                yield ch
+
+    return Streamer()
+
+
+def _mixed_mode_graph():
+    """`model` streams tokens; a later `finalize` node appends a finished AIMessage."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    model = _streaming_model()
+    b = StateGraph(MessagesState)
+    b.add_node("model", lambda s: {"messages": [model.invoke(s["messages"])]})
+    b.add_node("finalize", lambda s: {"messages": [AIMessage(content="[Reviewed by policy engine]")]})
+    b.add_edge(START, "model")
+    b.add_edge("model", "finalize")
+    b.add_edge("finalize", END)
+    return b.compile()
+
+
+async def test_event_frames_mixed_mode_keeps_finished_message():
+    # gh #89: the finished `finalize` message used to vanish — once `model` streamed,
+    # the whole final snapshot was suppressed (`and not streamed_text`), dropping every
+    # later non-streamed message. It must now render, mapped to its node.
+    frames = await _collect(iter_event_frames(build_agent(_mixed_mode_graph()), "hi", "m89e"))
+    text = "".join(f["content"] for f in frames if f.get("type") == "content")
+    assert "hi from model" in text
+    assert "[Reviewed by policy engine]" in text, f"finished message dropped: {text!r}"
+    finalize = [
+        f for f in frames
+        if f.get("type") == "content" and "[Reviewed by policy engine]" in f["content"]
+    ]
+    assert finalize and finalize[0]["node"] == "finalize", finalize
+
+
+async def test_chunk_frames_mixed_mode_keeps_finished_message():
+    frames = await _collect(iter_chunk_frames(build_agent(_mixed_mode_graph()), "hi", "m89c"))
+    text = "".join(f["chunk"] for f in frames if "chunk" in f)
+    assert "hi from model" in text
+    assert "[Reviewed by policy engine]" in text, f"finished message dropped: {text!r}"
+
+
+def _single_streaming_graph():
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    model = _streaming_model()
+    b = StateGraph(MessagesState)
+    b.add_node("model", lambda s: {"messages": [model.invoke(s["messages"])]})
+    b.add_edge(START, "model")
+    b.add_edge("model", END)
+    return b.compile()
+
+
+async def test_event_frames_fully_streamed_no_duplicate():
+    # Guard the #89 fix: dropping the coarse `not streamed_text` guard must not make a
+    # fully-streamed turn re-emit its streamed message from the final snapshot — the
+    # streamed message id is deduped.
+    frames = await _collect(iter_event_frames(build_agent(_single_streaming_graph()), "hi", "m89dupE"))
+    text = "".join(f["content"] for f in frames if f.get("type") == "content")
+    assert text == "hi from model", f"duplicated streamed content: {text!r}"
+
+
+async def test_chunk_frames_fully_streamed_no_duplicate():
+    frames = await _collect(iter_chunk_frames(build_agent(_single_streaming_graph()), "hi", "m89dupC"))
+    text = "".join(f["chunk"] for f in frames if "chunk" in f)
+    assert text == "hi from model", f"duplicated streamed content: {text!r}"
+
+
+# --- gh #90: GenericToolExtractor's "*" tool_name is the fallback, reachable through
+# the supported `extractors=[...]` API. ---
+
+def _custom_tool_graph():
+    """A graph that calls one tool with no dedicated extractor, then replies."""
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    @tool
+    def my_custom_tool(q: str) -> str:
+        """A custom tool the parser has no dedicated extractor for."""
+        return "custom-tool-output"
+
+    class ToolThenDone(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "t"
+
+        def _generate(self, messages, stop=None, run_manager=None, **k):
+            if any(isinstance(m, ToolMessage) for m in messages):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+            m = AIMessage(content="", tool_calls=[{"name": "my_custom_tool", "args": {"q": "x"}, "id": "c1"}])
+            return ChatResult(generations=[ChatGeneration(message=m)])
+
+    model = ToolThenDone()
+    b = StateGraph(MessagesState)
+    b.add_node("model", lambda s: {"messages": [model.invoke(s["messages"])]})
+    b.add_node("tools", ToolNode([my_custom_tool]))
+    b.add_edge(START, "model")
+    b.add_conditional_edges(
+        "model",
+        lambda s: "tools" if getattr(s["messages"][-1], "tool_calls", None) else END,
+        {"tools": "tools", END: END},
+    )
+    b.add_edge("tools", "model")
+    return b.compile()
+
+
+async def test_generic_tool_extractor_fires_as_fallback():
+    # gh #90: GenericToolExtractor (tool_name == "*") was inert — "*" was a plain
+    # dict key no real tool name matched. It's now the fallback for any tool without a
+    # dedicated extractor, so it fires here and emits a generic `extraction` frame.
+    from langstage_core import GenericToolExtractor
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_event_frames(agent, "go", "g90", extractors=[GenericToolExtractor()])
+    )
+    extraction = [f for f in frames if f["type"] == "extraction"]
+    assert extraction, f"generic fallback never fired: {[f['type'] for f in frames]}"
+    assert extraction[0]["tool_name"] == "my_custom_tool"
+    assert extraction[0]["extracted_type"] == "tool_call"
+    assert extraction[0]["data"] == {"content": "custom-tool-output"}
+
+
+async def test_specific_extractor_wins_over_generic_fallback():
+    # A dedicated extractor must still take precedence over the "*" fallback when both
+    # are registered — the fallback only applies to tools without a specific match.
+    from langstage_core import GenericToolExtractor
+
+    class MyToolExtractor:
+        tool_name = "my_custom_tool"
+        extracted_type = "custom_specific"
+
+        def extract(self, content):
+            return {"specific": content}
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_event_frames(
+            agent, "go", "g90b", extractors=[MyToolExtractor(), GenericToolExtractor()]
+        )
+    )
+    extraction = [f for f in frames if f["type"] == "extraction"]
+    assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
+    assert extraction[0]["data"] == {"specific": "custom-tool-output"}

@@ -14,7 +14,9 @@ class ToolExtractor(Protocol):
     """Protocol for custom tool content extractors.
 
     Implement this protocol to create extractors for domain-specific tools.
-    Register extractors with StreamParser.register_extractor().
+    Register extractors by passing them to ``iter_event_frames(agent, ...,
+    extractors=[...])``; after each tool result the extractor whose ``tool_name``
+    matches runs, and a non-None return emits an ``extraction`` frame.
 
     Example:
         class CanvasExtractor:
@@ -32,8 +34,10 @@ class ToolExtractor(Protocol):
                         return {"type": "markdown", "data": content}
                 return None
 
-        parser = StreamParser()
-        parser.register_extractor(CanvasExtractor())
+        from langstage_core.agui import iter_event_frames
+        async for frame in iter_event_frames(agent, "hi", "t",
+                                             extractors=[CanvasExtractor()]):
+            ...
     """
 
     @property

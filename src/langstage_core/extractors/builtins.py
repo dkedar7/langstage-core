@@ -350,31 +350,38 @@ class GenericToolExtractor:
     — never ``ToolExtractedEvent`` — so hosts that switch on extracted
     events to render rich cards have no signal to act on.
 
-    Registering this as a fallback (``StreamParser(default_extractor=
-    GenericToolExtractor())``) closes that gap: any tool name without a
-    specific extractor will emit a ``ToolExtractedEvent`` of
+    Registering this as the fallback closes that gap: any tool name without a
+    specific extractor emits an ``extraction`` frame of
     ``extracted_type="tool_call"`` whose data preserves the raw content
-    (and the optional artifact) so downstream renderers can build a
-    generic "tool callout" card without per-tool knowledge.
+    so downstream renderers can build a generic "tool callout" card
+    without per-tool knowledge. Pass it alongside any specific extractors::
 
-    This is intentionally *opt-in* via the new
-    :class:`~langstage_core.StreamParser` ``default_extractor``
-    kwarg. The historical behaviour (only emit ``ToolExtractedEvent`` for
-    tools with explicit extractors) is preserved by default so existing
-    hosts that switch on specific extracted types don't suddenly receive
-    new events.
+        from langstage_core.agui import iter_event_frames
+        from langstage_core import GenericToolExtractor
+
+        async for frame in iter_event_frames(
+            agent, "hi", "t", extractors=[MyToolExtractor(), GenericToolExtractor()]
+        ):
+            ...
+
+    This is intentionally *opt-in* — you only get generic tool-call frames when
+    you include ``GenericToolExtractor`` in ``extractors``. The historical
+    behaviour (only emit an ``extraction`` frame for tools with a dedicated
+    extractor) is preserved when it is absent, so existing hosts that switch on
+    specific extracted types don't suddenly receive new events.
 
     Notes:
-        - ``tool_name`` is the sentinel ``"*"`` for documentation / hosts
-          that introspect ``parser._default_extractor``; the parser
-          never indexes ``_extractors`` by this value.
+        - ``tool_name`` is the sentinel ``"*"``: ``iter_event_frames`` treats an
+          extractor with this ``tool_name`` as the fallback (used when no
+          specific extractor matches the tool) rather than dispatching on it
+          literally (gh #90).
         - Returns ``None`` when content is also ``None`` so a tool that
           legitimately returns nothing doesn't fire a spurious empty
           card. Empty strings and empty dicts still surface (they may
           carry meaning to the host's renderer).
     """
 
-    tool_name = "*"  # sentinel; not used for dispatch lookup
+    tool_name = "*"  # sentinel; treated as the fallback, not a literal dispatch key
     extracted_type = "tool_call"
 
     def extract(self, content: Any) -> dict[str, Any] | None:
