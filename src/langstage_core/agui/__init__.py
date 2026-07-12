@@ -359,6 +359,12 @@ async def iter_event_frames(
     )
 
     streamed_text = False
+    # Message ids already emitted token-by-token (from TextMessageContentEvent), so
+    # the final snapshot can emit the assistant messages it did NOT stream without
+    # duplicating the streamed ones. A mixed turn — an earlier node streams, a later
+    # node returns a finished AIMessage — otherwise dropped the finished message,
+    # because the whole snapshot was suppressed once anything streamed (gh #89).
+    streamed_ids: set[str] = set()
     tool_args: dict[str, str] = {}
     tool_names: dict[str, str] = {}
     # The langgraph node currently executing, from StepStartedEvent — so a
@@ -387,6 +393,9 @@ async def iter_event_frames(
                     errored_tools[nm] = errored_tools.get(nm, 0) + 1
         elif t == "TextMessageContentEvent":
             streamed_text = True
+            mid = getattr(ev, "message_id", None)
+            if mid is not None:
+                streamed_ids.add(mid)
             yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
         elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
             # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
@@ -459,12 +468,21 @@ async def iter_event_frames(
                 "review_configs": review_configs,
                 "allowed_decisions": decisions,
             }
-        elif t == "MessagesSnapshotEvent" and not streamed_text:
-            # Non-streaming graphs deliver content in one final snapshot. The snapshot
-            # is the FULL thread (prior turns come from the checkpointer), so slice to
-            # what follows the last user message — otherwise the agent re-emits its
-            # entire history every turn (gh #67). Then map the trailing assistant
-            # messages back to the steps that produced them (gh #43).
+        elif t == "MessagesSnapshotEvent":
+            # The final snapshot carries every assistant message the turn produced,
+            # including any a later node returned finished (non-streamed). Emit the
+            # ones NOT already streamed token-by-token — keyed by message id — so a
+            # mixed turn (an earlier node streams, a later node appends a finished
+            # AIMessage) renders the finished message too, instead of dropping it once
+            # anything streamed (gh #89). A fully-streamed turn skips them all (already
+            # emitted); a fully-snapshot turn emits them all (gh #67).
+            #
+            # The snapshot is the FULL thread (prior turns come from the checkpointer),
+            # so slice to what follows the last user message — otherwise the agent
+            # re-emits its entire history every turn (gh #67). Then map the trailing
+            # assistant messages back to the steps that produced them (gh #43); the
+            # index alignment uses the full assistant list so skipping streamed ones
+            # doesn't shift the node mapping.
             msgs = list(ev.messages)
             last_user = max(
                 (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
@@ -476,6 +494,8 @@ async def iter_event_frames(
             ]
             offset = max(0, len(assistant) - len(step_nodes))
             for i, m in enumerate(assistant):
+                if getattr(m, "id", None) in streamed_ids:
+                    continue  # already emitted token-by-token; don't duplicate
                 idx = i - offset
                 node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
                 yield {"type": "content", "content": m.content, "role": "assistant", "node": node}
@@ -523,6 +543,10 @@ async def iter_chunk_frames(
     )
 
     streamed_text = False
+    # Message ids already streamed token-by-token, so the final snapshot can emit the
+    # assistant messages it did NOT stream without duplicating them — the mixed-turn
+    # fix (gh #89), see iter_event_frames for the full rationale.
+    streamed_ids: set[str] = set()
     tool_buf: dict[str, dict[str, str]] = {}
     # The langgraph node currently executing (from StepStartedEvent) so a multi-node
     # graph's chunks carry the real node instead of a fixed "agent" — renderers use
@@ -539,6 +563,9 @@ async def iter_chunk_frames(
                 step_nodes.append(step)
         elif t == "TextMessageContentEvent":
             streamed_text = True
+            mid = getattr(ev, "message_id", None)
+            if mid is not None:
+                streamed_ids.add(mid)
             yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
         elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
             # Reasoning-model chain-of-thought on the chunk wire — a distinct
@@ -579,11 +606,20 @@ async def iter_chunk_frames(
                     "allowed_decisions": decisions,
                 },
             }
-        elif t == "MessagesSnapshotEvent" and not streamed_text:
-            # Non-streaming graphs deliver content in one final snapshot. The snapshot
-            # is the FULL thread, so slice to what follows the last user message —
-            # otherwise the agent re-emits its whole history every turn (gh #67). Then
-            # map the trailing assistant messages back to their steps (gh #43).
+        elif t == "MessagesSnapshotEvent":
+            # The final snapshot carries every assistant message the turn produced,
+            # including any a later node returned finished (non-streamed). Emit the
+            # ones NOT already streamed token-by-token — keyed by message id — so a
+            # mixed turn (an earlier node streams, a later node appends a finished
+            # AIMessage) renders the finished message too, instead of dropping it once
+            # anything streamed (gh #89). A fully-streamed turn skips them all; a
+            # fully-snapshot turn emits them all (gh #67).
+            #
+            # The snapshot is the FULL thread, so slice to what follows the last user
+            # message — otherwise the agent re-emits its whole history every turn (gh
+            # #67). Then map the trailing assistant messages back to their steps (gh
+            # #43); the index alignment uses the full assistant list so skipping
+            # streamed ones doesn't shift the node mapping.
             msgs = list(ev.messages)
             last_user = max(
                 (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
@@ -595,6 +631,8 @@ async def iter_chunk_frames(
             ]
             offset = max(0, len(assistant) - len(step_nodes))
             for i, m in enumerate(assistant):
+                if getattr(m, "id", None) in streamed_ids:
+                    continue  # already emitted token-by-token; don't duplicate
                 idx = i - offset
                 node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
                 yield {"status": "streaming", "chunk": m.content, "node": node}

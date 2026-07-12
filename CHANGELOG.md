@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.17] - 2026-07-12
+
+### Fixed
+- **A mixed-mode turn silently dropped a finished (non-streamed) `AIMessage` from a
+  later node once any earlier node had streamed tokens (gh #89).** Both
+  `iter_event_frames` and `iter_chunk_frames` rendered non-streamed assistant content
+  only through the final `MessagesSnapshotEvent`, but that branch was guarded by
+  `and not streamed_text` — so a turn that streamed one node (e.g. a model node) and
+  then appended a finished message from a later node (a guardrail / disclaimer /
+  formatting / fallback node) suppressed the *entire* snapshot, and the later node's
+  reply vanished with no error. The guard is replaced by per-message dedup keyed on
+  the streamed message ids: the snapshot now always runs and emits the assistant
+  messages it did **not** already stream token-by-token. A fully-streamed turn still
+  emits nothing extra (every id is deduped, so no duplication) and a fully-snapshot
+  turn is unchanged (nothing was streamed, so all messages emit) — preserving the
+  #67 history-slicing and #43 node-mapping behavior.
+
 ## [1.0.16] - 2026-07-10
 
 ### Fixed
