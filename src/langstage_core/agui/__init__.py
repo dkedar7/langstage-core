@@ -335,7 +335,11 @@ async def iter_event_frames(
     (``tool_name`` / ``extracted_type`` / ``extract(content)``). After each tool
     result, the matching extractor (by tool name) runs; a non-None return emits an
     ``extraction`` frame identical to ``event_to_dict(ToolExtractedEvent)`` — the
-    AG-UI home for domain callouts (e.g. hermes' skill/memory events).
+    AG-UI home for domain callouts (e.g. hermes' skill/memory events). An extractor
+    whose ``tool_name`` is the ``"*"`` sentinel (e.g.
+    :class:`~langstage_core.GenericToolExtractor`) is used as the *fallback* for any
+    tool without a specific extractor, so a generic tool-callout card can render
+    without per-tool knowledge (gh #90).
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -345,7 +349,14 @@ async def iter_event_frames(
     import uuid
 
     allowed_decisions = ["reject", "edit", "respond", "approve"]
-    by_tool = {e.tool_name: e for e in extractors}
+    # Dispatch extractors by tool name. An extractor whose tool_name is the "*"
+    # sentinel (GenericToolExtractor) is the fallback, applied to any tool without a
+    # dedicated extractor — otherwise "*" is just a dict key no real tool matches, so
+    # the documented public fallback is dead code on the 1.0 wire (gh #90).
+    by_tool = {e.tool_name: e for e in extractors if getattr(e, "tool_name", None) != "*"}
+    default_extractor = next(
+        (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
+    )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
@@ -442,7 +453,7 @@ async def iter_event_frames(
                 "error_message": result if is_error else None,
                 "duration_ms": None,
             }
-            extractor = by_tool.get(name)
+            extractor = by_tool.get(name, default_extractor)
             if extractor is not None:
                 data = extractor.extract(getattr(ev, "content", ""))
                 if data is not None:

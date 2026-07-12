@@ -304,3 +304,85 @@ async def test_chunk_frames_fully_streamed_no_duplicate():
     frames = await _collect(iter_chunk_frames(build_agent(_single_streaming_graph()), "hi", "m89dupC"))
     text = "".join(f["chunk"] for f in frames if "chunk" in f)
     assert text == "hi from model", f"duplicated streamed content: {text!r}"
+
+
+# --- gh #90: GenericToolExtractor's "*" tool_name is the fallback, reachable through
+# the supported `extractors=[...]` API. ---
+
+def _custom_tool_graph():
+    """A graph that calls one tool with no dedicated extractor, then replies."""
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    @tool
+    def my_custom_tool(q: str) -> str:
+        """A custom tool the parser has no dedicated extractor for."""
+        return "custom-tool-output"
+
+    class ToolThenDone(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "t"
+
+        def _generate(self, messages, stop=None, run_manager=None, **k):
+            if any(isinstance(m, ToolMessage) for m in messages):
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+            m = AIMessage(content="", tool_calls=[{"name": "my_custom_tool", "args": {"q": "x"}, "id": "c1"}])
+            return ChatResult(generations=[ChatGeneration(message=m)])
+
+    model = ToolThenDone()
+    b = StateGraph(MessagesState)
+    b.add_node("model", lambda s: {"messages": [model.invoke(s["messages"])]})
+    b.add_node("tools", ToolNode([my_custom_tool]))
+    b.add_edge(START, "model")
+    b.add_conditional_edges(
+        "model",
+        lambda s: "tools" if getattr(s["messages"][-1], "tool_calls", None) else END,
+        {"tools": "tools", END: END},
+    )
+    b.add_edge("tools", "model")
+    return b.compile()
+
+
+async def test_generic_tool_extractor_fires_as_fallback():
+    # gh #90: GenericToolExtractor (tool_name == "*") was inert — "*" was a plain
+    # dict key no real tool name matched. It's now the fallback for any tool without a
+    # dedicated extractor, so it fires here and emits a generic `extraction` frame.
+    from langstage_core import GenericToolExtractor
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_event_frames(agent, "go", "g90", extractors=[GenericToolExtractor()])
+    )
+    extraction = [f for f in frames if f["type"] == "extraction"]
+    assert extraction, f"generic fallback never fired: {[f['type'] for f in frames]}"
+    assert extraction[0]["tool_name"] == "my_custom_tool"
+    assert extraction[0]["extracted_type"] == "tool_call"
+    assert extraction[0]["data"] == {"content": "custom-tool-output"}
+
+
+async def test_specific_extractor_wins_over_generic_fallback():
+    # A dedicated extractor must still take precedence over the "*" fallback when both
+    # are registered — the fallback only applies to tools without a specific match.
+    from langstage_core import GenericToolExtractor
+
+    class MyToolExtractor:
+        tool_name = "my_custom_tool"
+        extracted_type = "custom_specific"
+
+        def extract(self, content):
+            return {"specific": content}
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_event_frames(
+            agent, "go", "g90b", extractors=[MyToolExtractor(), GenericToolExtractor()]
+        )
+    )
+    extraction = [f for f in frames if f["type"] == "extraction"]
+    assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
+    assert extraction[0]["data"] == {"specific": "custom-tool-output"}

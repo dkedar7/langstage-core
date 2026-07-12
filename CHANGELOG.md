@@ -16,6 +16,19 @@
   emits nothing extra (every id is deduped, so no duplication) and a fully-snapshot
   turn is unchanged (nothing was streamed, so all messages emit) — preserving the
   #67 history-slicing and #43 node-mapping behavior.
+- **`GenericToolExtractor` was unreachable on the 1.0 AG-UI path — a shipped, top-level
+  importable public built-in that was 100% dead code (gh #90).** Its documented purpose
+  is to be the *fallback* extractor (any tool without a dedicated extractor emits a
+  generic `tool_call` extraction), but its only registration API —
+  `StreamParser(default_extractor=…)` — was removed in 1.0 (ADR 0003), and the
+  replacement `iter_event_frames(…, extractors=[…])` dispatched **strictly by
+  `tool_name`**, so its `"*"` sentinel was registered under the literal key `"*"` and no
+  real tool name ever matched it. `iter_event_frames` now treats an extractor whose
+  `tool_name == "*"` as the fallback (consulted when no specific extractor matches), so
+  the built-in fires through the supported public API; a dedicated extractor still wins
+  over the fallback. Also refreshed the stale docstrings that pointed at the removed
+  `StreamParser` API — the public `ToolExtractor` protocol Example (`base.py`) and
+  `GenericToolExtractor` (`builtins.py`) now document the `extractors=[…]` path.
 
 ## [1.0.16] - 2026-07-10
 
