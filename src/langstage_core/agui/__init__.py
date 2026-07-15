@@ -389,130 +389,138 @@ async def iter_event_frames(
     # name and correct the tool_end frame. (gh #55)
     errored_tools: dict[str, int] = {}
 
-    async for ev in agent.run(run_input):
-        t = type(ev).__name__
-        if t == "StepStartedEvent":
-            step = getattr(ev, "step_name", None)
-            if step:
-                current_node = step
-                step_nodes.append(step)
-        elif t == "RawEvent":
-            raw = getattr(ev, "event", None) or {}
-            if raw.get("event") == "on_tool_error":
-                nm = raw.get("name")
-                if nm:
-                    errored_tools[nm] = errored_tools.get(nm, 0) + 1
-        elif t == "TextMessageContentEvent":
-            streamed_text = True
-            mid = getattr(ev, "message_id", None)
-            if mid is not None:
-                streamed_ids.add(mid)
-            yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
-        elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
-            # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
-            # DeepSeek R1, Qwen, xAI, ...). Surface it as the advertised `reasoning`
-            # frame so renderers can show/collapse the thinking separately from the
-            # answer, instead of dropping it. Does NOT set streamed_text — reasoning
-            # isn't the answer, so a reasoning-only turn still falls back to the final
-            # snapshot for the reply. (gh #71)
-            delta = getattr(ev, "delta", "")
-            if delta:
-                yield {"type": "reasoning", "content": delta, "node": current_node}
-        elif t == "ToolCallStartEvent":
-            tool_names[ev.tool_call_id] = ev.tool_call_name
-            tool_args[ev.tool_call_id] = ""
-        elif t == "ToolCallArgsEvent":
-            tool_args[ev.tool_call_id] = tool_args.get(ev.tool_call_id, "") + ev.delta
-        elif t == "ToolCallEndEvent":
-            raw = tool_args.pop(ev.tool_call_id, "")
-            try:
-                args = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                args = {"_raw": raw}
-            yield {
-                "type": "tool_start",
-                "id": ev.tool_call_id,
-                "name": tool_names.get(ev.tool_call_id, "tool"),
-                "args": args,
-                "node": current_node,
-            }
-        elif t == "ToolCallResultEvent":
-            result = str(getattr(ev, "content", ""))
-            if len(result) > max_result_len:
-                result = result[:max_result_len] + "…(truncated)"
-            name = tool_names.get(ev.tool_call_id, "tool")
-            is_error = errored_tools.get(name, 0) > 0
-            if is_error:
-                errored_tools[name] -= 1
-            yield {
-                "type": "tool_end",
-                "id": ev.tool_call_id,
-                "name": name,
-                "result": result,
-                "status": "error" if is_error else "success",
-                "error_message": result if is_error else None,
-                "duration_ms": None,
-            }
-            extractor = by_tool.get(name, default_extractor)
-            if extractor is not None:
-                data = extractor.extract(getattr(ev, "content", ""))
-                if data is not None:
-                    yield {
-                        "type": "extraction",
-                        "tool_name": name,
-                        "extracted_type": extractor.extracted_type,
-                        "data": data,
-                    }
-        elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
-            payload = getattr(ev, "value", None)
-            if isinstance(payload, str):
+    try:
+        async for ev in agent.run(run_input):
+            t = type(ev).__name__
+            if t == "StepStartedEvent":
+                step = getattr(ev, "step_name", None)
+                if step:
+                    current_node = step
+                    step_nodes.append(step)
+            elif t == "RawEvent":
+                raw = getattr(ev, "event", None) or {}
+                if raw.get("event") == "on_tool_error":
+                    nm = raw.get("name")
+                    if nm:
+                        errored_tools[nm] = errored_tools.get(nm, 0) + 1
+            elif t == "TextMessageContentEvent":
+                streamed_text = True
+                mid = getattr(ev, "message_id", None)
+                if mid is not None:
+                    streamed_ids.add(mid)
+                yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
+            elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
+                # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
+                # DeepSeek R1, Qwen, xAI, ...). Surface it as the advertised `reasoning`
+                # frame so renderers can show/collapse the thinking separately from the
+                # answer, instead of dropping it. Does NOT set streamed_text — reasoning
+                # isn't the answer, so a reasoning-only turn still falls back to the final
+                # snapshot for the reply. (gh #71)
+                delta = getattr(ev, "delta", "")
+                if delta:
+                    yield {"type": "reasoning", "content": delta, "node": current_node}
+            elif t == "ToolCallStartEvent":
+                tool_names[ev.tool_call_id] = ev.tool_call_name
+                tool_args[ev.tool_call_id] = ""
+            elif t == "ToolCallArgsEvent":
+                tool_args[ev.tool_call_id] = tool_args.get(ev.tool_call_id, "") + ev.delta
+            elif t == "ToolCallEndEvent":
+                raw = tool_args.pop(ev.tool_call_id, "")
                 try:
-                    payload = json.loads(payload)
+                    args = json.loads(raw) if raw else {}
                 except json.JSONDecodeError:
-                    payload = {}
-            action_requests, review_configs, decisions = _normalize_interrupt(
-                payload, allowed_decisions
-            )
-            yield {
-                "type": "interrupt",
-                "action_requests": action_requests,
-                "review_configs": review_configs,
-                "allowed_decisions": decisions,
-            }
-        elif t == "MessagesSnapshotEvent":
-            # The final snapshot carries every assistant message the turn produced,
-            # including any a later node returned finished (non-streamed). Emit the
-            # ones NOT already streamed token-by-token — keyed by message id — so a
-            # mixed turn (an earlier node streams, a later node appends a finished
-            # AIMessage) renders the finished message too, instead of dropping it once
-            # anything streamed (gh #89). A fully-streamed turn skips them all (already
-            # emitted); a fully-snapshot turn emits them all (gh #67).
-            #
-            # The snapshot is the FULL thread (prior turns come from the checkpointer),
-            # so slice to what follows the last user message — otherwise the agent
-            # re-emits its entire history every turn (gh #67). Then map the trailing
-            # assistant messages back to the steps that produced them (gh #43); the
-            # index alignment uses the full assistant list so skipping streamed ones
-            # doesn't shift the node mapping.
-            msgs = list(ev.messages)
-            last_user = max(
-                (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
-                default=-1,
-            )
-            assistant = [
-                m for m in msgs[last_user + 1:]
-                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
-            ]
-            offset = max(0, len(assistant) - len(step_nodes))
-            for i, m in enumerate(assistant):
-                if getattr(m, "id", None) in streamed_ids:
-                    continue  # already emitted token-by-token; don't duplicate
-                idx = i - offset
-                node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                yield {"type": "content", "content": m.content, "role": "assistant", "node": node}
-        elif t == "RunErrorEvent":
-            yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
-            return
+                    args = {"_raw": raw}
+                yield {
+                    "type": "tool_start",
+                    "id": ev.tool_call_id,
+                    "name": tool_names.get(ev.tool_call_id, "tool"),
+                    "args": args,
+                    "node": current_node,
+                }
+            elif t == "ToolCallResultEvent":
+                result = str(getattr(ev, "content", ""))
+                if len(result) > max_result_len:
+                    result = result[:max_result_len] + "…(truncated)"
+                name = tool_names.get(ev.tool_call_id, "tool")
+                is_error = errored_tools.get(name, 0) > 0
+                if is_error:
+                    errored_tools[name] -= 1
+                yield {
+                    "type": "tool_end",
+                    "id": ev.tool_call_id,
+                    "name": name,
+                    "result": result,
+                    "status": "error" if is_error else "success",
+                    "error_message": result if is_error else None,
+                    "duration_ms": None,
+                }
+                extractor = by_tool.get(name, default_extractor)
+                if extractor is not None:
+                    data = extractor.extract(getattr(ev, "content", ""))
+                    if data is not None:
+                        yield {
+                            "type": "extraction",
+                            "tool_name": name,
+                            "extracted_type": extractor.extracted_type,
+                            "data": data,
+                        }
+            elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
+                payload = getattr(ev, "value", None)
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        payload = {}
+                action_requests, review_configs, decisions = _normalize_interrupt(
+                    payload, allowed_decisions
+                )
+                yield {
+                    "type": "interrupt",
+                    "action_requests": action_requests,
+                    "review_configs": review_configs,
+                    "allowed_decisions": decisions,
+                }
+            elif t == "MessagesSnapshotEvent":
+                # The final snapshot carries every assistant message the turn produced,
+                # including any a later node returned finished (non-streamed). Emit the
+                # ones NOT already streamed token-by-token — keyed by message id — so a
+                # mixed turn (an earlier node streams, a later node appends a finished
+                # AIMessage) renders the finished message too, instead of dropping it once
+                # anything streamed (gh #89). A fully-streamed turn skips them all (already
+                # emitted); a fully-snapshot turn emits them all (gh #67).
+                #
+                # The snapshot is the FULL thread (prior turns come from the checkpointer),
+                # so slice to what follows the last user message — otherwise the agent
+                # re-emits its entire history every turn (gh #67). Then map the trailing
+                # assistant messages back to the steps that produced them (gh #43); the
+                # index alignment uses the full assistant list so skipping streamed ones
+                # doesn't shift the node mapping.
+                msgs = list(ev.messages)
+                last_user = max(
+                    (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
+                    default=-1,
+                )
+                assistant = [
+                    m for m in msgs[last_user + 1:]
+                    if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
+                ]
+                offset = max(0, len(assistant) - len(step_nodes))
+                for i, m in enumerate(assistant):
+                    if getattr(m, "id", None) in streamed_ids:
+                        continue  # already emitted token-by-token; don't duplicate
+                    idx = i - offset
+                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                    yield {"type": "content", "content": m.content, "role": "assistant", "node": node}
+            elif t == "RunErrorEvent":
+                yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
+                return
+
+    except Exception as exc:  # noqa: BLE001 — a node/graph exception during streaming surfaces
+        # as the documented terminal `error` frame instead of propagating out of the iterator
+        # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
+        # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
+        yield {"type": "error", "error": f"{type(exc).__name__}: {exc}"}
+        return
 
     yield {"type": "complete"}
 
@@ -523,16 +531,28 @@ async def iter_chunk_frames(
     thread_id: str,
     *,
     resume: Any = None,
+    extractors: Any = (),
     state: Any = None,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``stream_graph_updates``
-    chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result": ...}``,
+    chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result"/"extraction": ...}``,
     ``{"status": "interrupt", ...}``, ``{"status": "complete"}``, ``{"status": "error"}``).
 
     The chunk-dict counterpart of :func:`iter_event_frames`: the retirement path
     for surfaces on the ``stream_graph_updates`` wire (the cli and Jupyter render
     loops). ``resume`` rides ``forwarded_props.command.resume``; ``state`` seeds the
     graph input (for agents whose input carries more than ``messages``).
+
+    ``extractors`` is the same optional iterable of
+    :class:`~langstage_core.extractors.base.ToolExtractor` that :func:`iter_event_frames`
+    accepts — the README advertises it for *both* ``iter_*`` mappings, and the CLI/Jupyter
+    surfaces are on this wire (gh #92). After each tool result the matching extractor (by
+    tool name; an extractor whose ``tool_name`` is the ``"*"`` sentinel — e.g.
+    :class:`~langstage_core.GenericToolExtractor` — is the fallback for any tool without a
+    dedicated one) runs, and a non-None return emits an ``extraction`` chunk
+    ``{"status": "streaming", "extraction": {"tool_name", "extracted_type", "data"}}`` — the
+    chunk-wire home for the skill/memory/todo callouts the event wire's ``extraction`` frame
+    carries.
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -541,6 +561,13 @@ async def iter_chunk_frames(
     import json
     import uuid
 
+    # Dispatch extractors by tool name, with a "*"-tool_name extractor
+    # (GenericToolExtractor) as the fallback — the same scheme iter_event_frames uses,
+    # so `extractors=[...]` behaves identically on both `iter_*` mappings (gh #90, #92).
+    by_tool = {e.tool_name: e for e in extractors if getattr(e, "tool_name", None) != "*"}
+    default_extractor = next(
+        (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
+    )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
@@ -559,96 +586,125 @@ async def iter_chunk_frames(
     # fix (gh #89), see iter_event_frames for the full rationale.
     streamed_ids: set[str] = set()
     tool_buf: dict[str, dict[str, str]] = {}
+    # tool_call_id -> tool name, retained past ToolCallEndEvent (which pops tool_buf) so
+    # the later ToolCallResultEvent can dispatch the right extractor by name (gh #92).
+    tool_names: dict[str, str] = {}
     # The langgraph node currently executing (from StepStartedEvent) so a multi-node
     # graph's chunks carry the real node instead of a fixed "agent" — renderers use
     # it to separate one node's output from the next (gh #43).
     current_node = "agent"
     step_nodes: list[str] = []
 
-    async for ev in agent.run(run_input):
-        t = type(ev).__name__
-        if t == "StepStartedEvent":
-            step = getattr(ev, "step_name", None)
-            if step:
-                current_node = step
-                step_nodes.append(step)
-        elif t == "TextMessageContentEvent":
-            streamed_text = True
-            mid = getattr(ev, "message_id", None)
-            if mid is not None:
-                streamed_ids.add(mid)
-            yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
-        elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
-            # Reasoning-model chain-of-thought on the chunk wire — a distinct
-            # `reasoning` key (parallel to `chunk`) so renderers can style/collapse
-            # it, rather than dropping it. Not the answer, so no streamed_text. (gh #71)
-            delta = getattr(ev, "delta", "")
-            if delta:
-                yield {"status": "streaming", "reasoning": delta, "node": current_node}
-        elif t == "ToolCallStartEvent":
-            tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
-        elif t == "ToolCallArgsEvent":
-            tool_buf.setdefault(ev.tool_call_id, {"name": "tool", "args": ""})["args"] += ev.delta
-        elif t == "ToolCallEndEvent":
-            tc = tool_buf.pop(ev.tool_call_id, {"name": "tool", "args": ""})
-            try:
-                args = json.loads(tc["args"]) if tc["args"] else {}
-            except json.JSONDecodeError:
-                args = {"_raw": tc["args"]}
-            yield {"status": "streaming", "tool_calls": [{"name": tc["name"], "args": args}]}
-        elif t == "ToolCallResultEvent":
-            yield {"status": "streaming", "tool_result": getattr(ev, "content", "")}
-        elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
-            payload = getattr(ev, "value", None)
-            if isinstance(payload, str):
+    try:
+        async for ev in agent.run(run_input):
+            t = type(ev).__name__
+            if t == "StepStartedEvent":
+                step = getattr(ev, "step_name", None)
+                if step:
+                    current_node = step
+                    step_nodes.append(step)
+            elif t == "TextMessageContentEvent":
+                streamed_text = True
+                mid = getattr(ev, "message_id", None)
+                if mid is not None:
+                    streamed_ids.add(mid)
+                yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
+            elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
+                # Reasoning-model chain-of-thought on the chunk wire — a distinct
+                # `reasoning` key (parallel to `chunk`) so renderers can style/collapse
+                # it, rather than dropping it. Not the answer, so no streamed_text. (gh #71)
+                delta = getattr(ev, "delta", "")
+                if delta:
+                    yield {"status": "streaming", "reasoning": delta, "node": current_node}
+            elif t == "ToolCallStartEvent":
+                tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
+                tool_names[ev.tool_call_id] = ev.tool_call_name
+            elif t == "ToolCallArgsEvent":
+                tool_buf.setdefault(ev.tool_call_id, {"name": "tool", "args": ""})["args"] += ev.delta
+            elif t == "ToolCallEndEvent":
+                tc = tool_buf.pop(ev.tool_call_id, {"name": "tool", "args": ""})
                 try:
-                    payload = json.loads(payload)
+                    args = json.loads(tc["args"]) if tc["args"] else {}
                 except json.JSONDecodeError:
-                    payload = {}
-            # Normalize to a dict with action_requests so a chunk-wire consumer
-            # (cli: interrupt_data.get("action_requests")) doesn't crash on the
-            # standard HumanInterrupt *list* shape and gets a populated request. (#40)
-            action_requests, review_configs, decisions = _normalize_interrupt(payload)
-            yield {
-                "status": "interrupt",
-                "interrupt": {
-                    "action_requests": action_requests,
-                    "review_configs": review_configs,
-                    "allowed_decisions": decisions,
-                },
-            }
-        elif t == "MessagesSnapshotEvent":
-            # The final snapshot carries every assistant message the turn produced,
-            # including any a later node returned finished (non-streamed). Emit the
-            # ones NOT already streamed token-by-token — keyed by message id — so a
-            # mixed turn (an earlier node streams, a later node appends a finished
-            # AIMessage) renders the finished message too, instead of dropping it once
-            # anything streamed (gh #89). A fully-streamed turn skips them all; a
-            # fully-snapshot turn emits them all (gh #67).
-            #
-            # The snapshot is the FULL thread, so slice to what follows the last user
-            # message — otherwise the agent re-emits its whole history every turn (gh
-            # #67). Then map the trailing assistant messages back to their steps (gh
-            # #43); the index alignment uses the full assistant list so skipping
-            # streamed ones doesn't shift the node mapping.
-            msgs = list(ev.messages)
-            last_user = max(
-                (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
-                default=-1,
-            )
-            assistant = [
-                m for m in msgs[last_user + 1:]
-                if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
-            ]
-            offset = max(0, len(assistant) - len(step_nodes))
-            for i, m in enumerate(assistant):
-                if getattr(m, "id", None) in streamed_ids:
-                    continue  # already emitted token-by-token; don't duplicate
-                idx = i - offset
-                node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                yield {"status": "streaming", "chunk": m.content, "node": node}
-        elif t == "RunErrorEvent":
-            yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
+                    args = {"_raw": tc["args"]}
+                yield {"status": "streaming", "tool_calls": [{"name": tc["name"], "args": args}]}
+            elif t == "ToolCallResultEvent":
+                yield {"status": "streaming", "tool_result": getattr(ev, "content", "")}
+                # Run the matching extractor over the tool result and, on a non-None
+                # return, emit an `extraction` chunk — parity with iter_event_frames'
+                # `extraction` frame so the CLI/Jupyter surfaces can render the same
+                # skill/memory/todo callouts (gh #92).
+                name = tool_names.get(ev.tool_call_id, "tool")
+                extractor = by_tool.get(name, default_extractor)
+                if extractor is not None:
+                    data = extractor.extract(getattr(ev, "content", ""))
+                    if data is not None:
+                        yield {
+                            "status": "streaming",
+                            "extraction": {
+                                "tool_name": name,
+                                "extracted_type": extractor.extracted_type,
+                                "data": data,
+                            },
+                        }
+            elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
+                payload = getattr(ev, "value", None)
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        payload = {}
+                # Normalize to a dict with action_requests so a chunk-wire consumer
+                # (cli: interrupt_data.get("action_requests")) doesn't crash on the
+                # standard HumanInterrupt *list* shape and gets a populated request. (#40)
+                action_requests, review_configs, decisions = _normalize_interrupt(payload)
+                yield {
+                    "status": "interrupt",
+                    "interrupt": {
+                        "action_requests": action_requests,
+                        "review_configs": review_configs,
+                        "allowed_decisions": decisions,
+                    },
+                }
+            elif t == "MessagesSnapshotEvent":
+                # The final snapshot carries every assistant message the turn produced,
+                # including any a later node returned finished (non-streamed). Emit the
+                # ones NOT already streamed token-by-token — keyed by message id — so a
+                # mixed turn (an earlier node streams, a later node appends a finished
+                # AIMessage) renders the finished message too, instead of dropping it once
+                # anything streamed (gh #89). A fully-streamed turn skips them all; a
+                # fully-snapshot turn emits them all (gh #67).
+                #
+                # The snapshot is the FULL thread, so slice to what follows the last user
+                # message — otherwise the agent re-emits its whole history every turn (gh
+                # #67). Then map the trailing assistant messages back to their steps (gh
+                # #43); the index alignment uses the full assistant list so skipping
+                # streamed ones doesn't shift the node mapping.
+                msgs = list(ev.messages)
+                last_user = max(
+                    (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
+                    default=-1,
+                )
+                assistant = [
+                    m for m in msgs[last_user + 1:]
+                    if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
+                ]
+                offset = max(0, len(assistant) - len(step_nodes))
+                for i, m in enumerate(assistant):
+                    if getattr(m, "id", None) in streamed_ids:
+                        continue  # already emitted token-by-token; don't duplicate
+                    idx = i - offset
+                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                    yield {"status": "streaming", "chunk": m.content, "node": node}
+            elif t == "RunErrorEvent":
+                yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
+
+    except Exception as exc:  # noqa: BLE001 — a node/graph exception during streaming surfaces
+        # as the documented terminal `error` frame instead of propagating out of the iterator
+        # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
+        # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
+        yield {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+        return
 
     yield {"status": "complete"}
 

@@ -386,3 +386,97 @@ async def test_specific_extractor_wins_over_generic_fallback():
     extraction = [f for f in frames if f["type"] == "extraction"]
     assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
     assert extraction[0]["data"] == {"specific": "custom-tool-output"}
+
+
+# --- gh #92: `extractors=[...]` works on the chunk wire too (the README advertises it
+# for *both* `iter_*` mappings, and the CLI/Jupyter surfaces are on this wire). It emits
+# an `extraction` chunk — parity with iter_event_frames' `extraction` frame. ---
+
+async def test_iter_chunk_frames_accepts_extractors_param():
+    # The documented call from the README (`extractors=[...]` on an `iter_*` mapping) must
+    # not raise TypeError on the chunk mapping — the exact adopter crash in the report.
+    import inspect
+
+    assert "extractors" in inspect.signature(iter_chunk_frames).parameters
+
+
+async def test_iter_chunk_frames_runs_extractors():
+    from langstage_core import GenericToolExtractor
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_chunk_frames(agent, "go", "c92", extractors=[GenericToolExtractor()])
+    )
+    extraction = [f["extraction"] for f in frames if "extraction" in f]
+    assert extraction, f"no extraction chunk emitted: {[f for f in frames]}"
+    assert extraction[0]["tool_name"] == "my_custom_tool"
+    assert extraction[0]["extracted_type"] == "tool_call"
+    assert extraction[0]["data"] == {"content": "custom-tool-output"}
+    # The extraction chunk rides the normal stream — it must still terminate cleanly.
+    assert frames[-1] == {"status": "complete"}
+
+
+async def test_iter_chunk_frames_specific_extractor_wins_over_generic_fallback():
+    from langstage_core import GenericToolExtractor
+
+    class MyToolExtractor:
+        tool_name = "my_custom_tool"
+        extracted_type = "custom_specific"
+
+        def extract(self, content):
+            return {"specific": content}
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_chunk_frames(
+            agent, "go", "c92b", extractors=[MyToolExtractor(), GenericToolExtractor()]
+        )
+    )
+    extraction = [f["extraction"] for f in frames if "extraction" in f]
+    assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
+    assert extraction[0]["data"] == {"specific": "custom-tool-output"}
+
+
+async def test_iter_chunk_frames_without_extractors_emits_no_extraction():
+    # Opt-in and backward compatible: with no extractors, the chunk wire is byte-for-byte
+    # its old self — no `extraction` chunk — so existing CLI/Jupyter consumers are unchanged.
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(iter_chunk_frames(agent, "go", "c92c"))
+    assert not any("extraction" in f for f in frames), frames
+
+
+# --- gh #93: a node/graph exception during streaming surfaces as the documented terminal
+# `error` frame instead of propagating out of the iterator and crashing the consumer's
+# `async for` (the README Quick start / shipped WebSocket example rely on the `error`
+# frame). Parity with the resilience build_app / SessionAdapter already provide. ---
+
+def _raising_graph():
+    """A graph whose only node raises mid-run — the common failure path (a node/tool/model
+    call that throws) the documented consumer loop must survive as an `error` frame."""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    def boom(state):
+        raise RuntimeError("model call failed")
+
+    b = StateGraph(MessagesState)
+    b.add_node("boom", boom)
+    b.add_edge(START, "boom")
+    b.add_edge("boom", END)
+    return b.compile()
+
+
+async def test_event_frames_node_exception_becomes_terminal_error_frame():
+    # Before the fix, `_collect` re-raises the propagated RuntimeError (the consumer crash);
+    # after, the exception is a terminal `error` frame and iteration ends cleanly.
+    frames = await _collect(iter_event_frames(build_agent(_raising_graph()), "hi", "e93"))
+    assert frames[-1]["type"] == "error", frames
+    assert "RuntimeError" in frames[-1]["error"] and "model call failed" in frames[-1]["error"]
+    # Terminal: the error frame is the last thing yielded — no misleading trailing `complete`.
+    assert not any(f.get("type") == "complete" for f in frames), frames
+
+
+async def test_chunk_frames_node_exception_becomes_terminal_error_frame():
+    frames = await _collect(iter_chunk_frames(build_agent(_raising_graph()), "hi", "c93"))
+    assert frames[-1]["status"] == "error", frames
+    assert "RuntimeError" in frames[-1]["error"] and "model call failed" in frames[-1]["error"]
+    assert not any(f.get("status") == "complete" for f in frames), frames
