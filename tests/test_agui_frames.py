@@ -388,6 +388,63 @@ async def test_specific_extractor_wins_over_generic_fallback():
     assert extraction[0]["data"] == {"specific": "custom-tool-output"}
 
 
+# --- gh #92: `extractors=[...]` works on the chunk wire too (the README advertises it
+# for *both* `iter_*` mappings, and the CLI/Jupyter surfaces are on this wire). It emits
+# an `extraction` chunk — parity with iter_event_frames' `extraction` frame. ---
+
+async def test_iter_chunk_frames_accepts_extractors_param():
+    # The documented call from the README (`extractors=[...]` on an `iter_*` mapping) must
+    # not raise TypeError on the chunk mapping — the exact adopter crash in the report.
+    import inspect
+
+    assert "extractors" in inspect.signature(iter_chunk_frames).parameters
+
+
+async def test_iter_chunk_frames_runs_extractors():
+    from langstage_core import GenericToolExtractor
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_chunk_frames(agent, "go", "c92", extractors=[GenericToolExtractor()])
+    )
+    extraction = [f["extraction"] for f in frames if "extraction" in f]
+    assert extraction, f"no extraction chunk emitted: {[f for f in frames]}"
+    assert extraction[0]["tool_name"] == "my_custom_tool"
+    assert extraction[0]["extracted_type"] == "tool_call"
+    assert extraction[0]["data"] == {"content": "custom-tool-output"}
+    # The extraction chunk rides the normal stream — it must still terminate cleanly.
+    assert frames[-1] == {"status": "complete"}
+
+
+async def test_iter_chunk_frames_specific_extractor_wins_over_generic_fallback():
+    from langstage_core import GenericToolExtractor
+
+    class MyToolExtractor:
+        tool_name = "my_custom_tool"
+        extracted_type = "custom_specific"
+
+        def extract(self, content):
+            return {"specific": content}
+
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(
+        iter_chunk_frames(
+            agent, "go", "c92b", extractors=[MyToolExtractor(), GenericToolExtractor()]
+        )
+    )
+    extraction = [f["extraction"] for f in frames if "extraction" in f]
+    assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
+    assert extraction[0]["data"] == {"specific": "custom-tool-output"}
+
+
+async def test_iter_chunk_frames_without_extractors_emits_no_extraction():
+    # Opt-in and backward compatible: with no extractors, the chunk wire is byte-for-byte
+    # its old self — no `extraction` chunk — so existing CLI/Jupyter consumers are unchanged.
+    agent = build_agent(_custom_tool_graph())
+    frames = await _collect(iter_chunk_frames(agent, "go", "c92c"))
+    assert not any("extraction" in f for f in frames), frames
+
+
 # --- gh #93: a node/graph exception during streaming surfaces as the documented terminal
 # `error` frame instead of propagating out of the iterator and crashing the consumer's
 # `async for` (the README Quick start / shipped WebSocket example rely on the `error`

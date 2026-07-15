@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.19] - 2026-07-14
+
+### Fixed
+- **`iter_chunk_frames` had no `extractors` parameter, so the README's "pass `extractors=[...]`
+  to the `iter_*` mappings" raised `TypeError` for the CLI/Jupyter surfaces it names (gh #92).**
+  The README advertises tool extractors as a feature of *both* `iter_*` mappings and points the
+  CLI/Jupyter surfaces at `iter_chunk_frames`, but only `iter_event_frames` accepted
+  `extractors` — so a CLI/Jupyter adopter following the docs hit
+  `iter_chunk_frames() got an unexpected keyword argument 'extractors'`, and the chunk wire had
+  no extraction shape at all (those surfaces couldn't render skill/memory/todo callouts).
+  `iter_chunk_frames` now accepts the same `extractors=[...]` iterable as `iter_event_frames`
+  (same by-tool-name dispatch, same `"*"`-sentinel `GenericToolExtractor` fallback) and, after
+  a tool result, emits an `extraction` chunk
+  `{"status": "streaming", "extraction": {"tool_name", "extracted_type", "data"}}` — the
+  chunk-wire parallel of the event wire's `extraction` frame. It stays opt-in: with no
+  `extractors`, the chunk stream is byte-for-byte unchanged, so existing consumers see no new
+  frames.
+
 ## [1.0.18] - 2026-07-14
 
 ### Fixed

@@ -531,16 +531,28 @@ async def iter_chunk_frames(
     thread_id: str,
     *,
     resume: Any = None,
+    extractors: Any = (),
     state: Any = None,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``stream_graph_updates``
-    chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result": ...}``,
+    chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result"/"extraction": ...}``,
     ``{"status": "interrupt", ...}``, ``{"status": "complete"}``, ``{"status": "error"}``).
 
     The chunk-dict counterpart of :func:`iter_event_frames`: the retirement path
     for surfaces on the ``stream_graph_updates`` wire (the cli and Jupyter render
     loops). ``resume`` rides ``forwarded_props.command.resume``; ``state`` seeds the
     graph input (for agents whose input carries more than ``messages``).
+
+    ``extractors`` is the same optional iterable of
+    :class:`~langstage_core.extractors.base.ToolExtractor` that :func:`iter_event_frames`
+    accepts — the README advertises it for *both* ``iter_*`` mappings, and the CLI/Jupyter
+    surfaces are on this wire (gh #92). After each tool result the matching extractor (by
+    tool name; an extractor whose ``tool_name`` is the ``"*"`` sentinel — e.g.
+    :class:`~langstage_core.GenericToolExtractor` — is the fallback for any tool without a
+    dedicated one) runs, and a non-None return emits an ``extraction`` chunk
+    ``{"status": "streaming", "extraction": {"tool_name", "extracted_type", "data"}}`` — the
+    chunk-wire home for the skill/memory/todo callouts the event wire's ``extraction`` frame
+    carries.
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -549,6 +561,13 @@ async def iter_chunk_frames(
     import json
     import uuid
 
+    # Dispatch extractors by tool name, with a "*"-tool_name extractor
+    # (GenericToolExtractor) as the fallback — the same scheme iter_event_frames uses,
+    # so `extractors=[...]` behaves identically on both `iter_*` mappings (gh #90, #92).
+    by_tool = {e.tool_name: e for e in extractors if getattr(e, "tool_name", None) != "*"}
+    default_extractor = next(
+        (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
+    )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
     run_input = RunAgentInput(
@@ -567,6 +586,9 @@ async def iter_chunk_frames(
     # fix (gh #89), see iter_event_frames for the full rationale.
     streamed_ids: set[str] = set()
     tool_buf: dict[str, dict[str, str]] = {}
+    # tool_call_id -> tool name, retained past ToolCallEndEvent (which pops tool_buf) so
+    # the later ToolCallResultEvent can dispatch the right extractor by name (gh #92).
+    tool_names: dict[str, str] = {}
     # The langgraph node currently executing (from StepStartedEvent) so a multi-node
     # graph's chunks carry the real node instead of a fixed "agent" — renderers use
     # it to separate one node's output from the next (gh #43).
@@ -596,6 +618,7 @@ async def iter_chunk_frames(
                     yield {"status": "streaming", "reasoning": delta, "node": current_node}
             elif t == "ToolCallStartEvent":
                 tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
+                tool_names[ev.tool_call_id] = ev.tool_call_name
             elif t == "ToolCallArgsEvent":
                 tool_buf.setdefault(ev.tool_call_id, {"name": "tool", "args": ""})["args"] += ev.delta
             elif t == "ToolCallEndEvent":
@@ -607,6 +630,23 @@ async def iter_chunk_frames(
                 yield {"status": "streaming", "tool_calls": [{"name": tc["name"], "args": args}]}
             elif t == "ToolCallResultEvent":
                 yield {"status": "streaming", "tool_result": getattr(ev, "content", "")}
+                # Run the matching extractor over the tool result and, on a non-None
+                # return, emit an `extraction` chunk — parity with iter_event_frames'
+                # `extraction` frame so the CLI/Jupyter surfaces can render the same
+                # skill/memory/todo callouts (gh #92).
+                name = tool_names.get(ev.tool_call_id, "tool")
+                extractor = by_tool.get(name, default_extractor)
+                if extractor is not None:
+                    data = extractor.extract(getattr(ev, "content", ""))
+                    if data is not None:
+                        yield {
+                            "status": "streaming",
+                            "extraction": {
+                                "tool_name": name,
+                                "extracted_type": extractor.extracted_type,
+                                "data": data,
+                            },
+                        }
             elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
                 payload = getattr(ev, "value", None)
                 if isinstance(payload, str):
