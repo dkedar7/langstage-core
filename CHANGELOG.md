@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.18] - 2026-07-14
+
+### Fixed
+- **A node/agent exception during streaming propagated out of `iter_event_frames` /
+  `iter_chunk_frames` and crashed the documented consumer loop, instead of surfacing as the
+  advertised terminal `error` frame (gh #93).** Both iterators document — and the README
+  Quick start + shipped `examples/fastapi_websocket.py` rely on — an `error` frame among
+  their outputs (`content` / `tool_start` / `tool_end` / `interrupt` / `complete` /
+  `error`). But the `error` frame was only reachable from a `RunErrorEvent`; the *common*
+  failure path — a node/tool/model call that raises — propagated straight out of
+  `agent.run()`, so a consumer written exactly as the docs show (a bare `async for` relying
+  on the `error` frame) crashed with the raw exception and never got the frame. The two
+  other consumers of `agent.run()` already hardened this (`build_app` emits a terminal
+  `RUN_ERROR`; `SessionAdapter._produce` wraps the iterator) — but the in-process iterators
+  the Quick start / WebSocket example hand to CLI/Jupyter/WebSocket adopters were left bare.
+  Both iterators now wrap the `agent.run(...)` loop in `try/except`, yielding the terminal
+  `error` frame (`{"type": "error", "error": "..."}` / `{"status": "error", "error":
+  "..."}`) — the same treatment `build_app.gen()` applies — so a real agent error renders a
+  failed turn instead of killing the consumer. The frame vocabulary is unchanged.
+
 ## [1.0.17] - 2026-07-12
 
 ### Fixed

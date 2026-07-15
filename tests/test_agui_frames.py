@@ -386,3 +386,40 @@ async def test_specific_extractor_wins_over_generic_fallback():
     extraction = [f for f in frames if f["type"] == "extraction"]
     assert extraction and extraction[0]["extracted_type"] == "custom_specific", extraction
     assert extraction[0]["data"] == {"specific": "custom-tool-output"}
+
+
+# --- gh #93: a node/graph exception during streaming surfaces as the documented terminal
+# `error` frame instead of propagating out of the iterator and crashing the consumer's
+# `async for` (the README Quick start / shipped WebSocket example rely on the `error`
+# frame). Parity with the resilience build_app / SessionAdapter already provide. ---
+
+def _raising_graph():
+    """A graph whose only node raises mid-run — the common failure path (a node/tool/model
+    call that throws) the documented consumer loop must survive as an `error` frame."""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    def boom(state):
+        raise RuntimeError("model call failed")
+
+    b = StateGraph(MessagesState)
+    b.add_node("boom", boom)
+    b.add_edge(START, "boom")
+    b.add_edge("boom", END)
+    return b.compile()
+
+
+async def test_event_frames_node_exception_becomes_terminal_error_frame():
+    # Before the fix, `_collect` re-raises the propagated RuntimeError (the consumer crash);
+    # after, the exception is a terminal `error` frame and iteration ends cleanly.
+    frames = await _collect(iter_event_frames(build_agent(_raising_graph()), "hi", "e93"))
+    assert frames[-1]["type"] == "error", frames
+    assert "RuntimeError" in frames[-1]["error"] and "model call failed" in frames[-1]["error"]
+    # Terminal: the error frame is the last thing yielded — no misleading trailing `complete`.
+    assert not any(f.get("type") == "complete" for f in frames), frames
+
+
+async def test_chunk_frames_node_exception_becomes_terminal_error_frame():
+    frames = await _collect(iter_chunk_frames(build_agent(_raising_graph()), "hi", "c93"))
+    assert frames[-1]["status"] == "error", frames
+    assert "RuntimeError" in frames[-1]["error"] and "model call failed" in frames[-1]["error"]
+    assert not any(f.get("status") == "complete" for f in frames), frames
