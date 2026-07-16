@@ -66,15 +66,23 @@ class Session:
 class SessionAdapter:
     """Session-scoped streaming for LangGraph agents.
 
+    Turns stream through the in-process AG-UI adapter (:func:`agui.iter_event_frames`)
+    since langstage-core 1.0 (ADR 0003).
+
     Attributes:
         graph: A compiled LangGraph graph (with a checkpointer for resumption).
-        stream_mode: Stream mode for ``astream`` and the parser. Defaults to
-            dual mode so content streams token-by-token while tool/interrupt
-            events arrive complete.
-        max_result_len: Max length for serialized tool results (see
-            :func:`event_to_dict`).
-        parser_kwargs: Extra kwargs forwarded to each ``StreamParser``
-            (e.g. ``skip_tools``, custom ``extractors`` via registration).
+        max_result_len: Max length for serialized tool results.
+        extractors: Optional iterable of
+            :class:`~langstage_core.extractors.base.ToolExtractor` forwarded to
+            :func:`agui.iter_event_frames`. After a matching tool result the
+            extractor runs and its non-None return is emitted as an ``extraction``
+            frame on the SSE stream — the same skill/memory/todo/``display_inline``
+            callouts the ``iter_*`` mappings emit, for parity with the CLI/Jupyter
+            (``iter_chunk_frames``) and VS Code (``iter_event_frames``) surfaces.
+            Defaults to none (no ``extraction`` frames). An extractor whose
+            ``tool_name`` is the ``"*"`` sentinel (e.g.
+            :class:`~langstage_core.GenericToolExtractor`) is the fallback for any
+            tool without a dedicated extractor.
 
     Example:
         adapter = SessionAdapter(graph=agent)
@@ -98,10 +106,14 @@ class SessionAdapter:
         *,
         graph: Any,
         max_result_len: int = 500,
+        extractors: Any = (),
         **_legacy: Any,  # accepts + ignores the removed stream_mode/agui/parser kwargs
     ):
         self._graph = graph
         self._max_result_len = max_result_len
+        # Forwarded to iter_event_frames so the web/task-board surface can emit
+        # `extraction` frames too — parity with the iter_* surfaces (gh #96).
+        self._extractors = extractors
         self._sessions: dict[str, Session] = {}
         # AG-UI-only since langstage-core 1.0 (ADR 0003): turns stream through the
         # in-process AG-UI adapter (``agui.iter_event_frames``) — the wrapped agent
@@ -238,6 +250,7 @@ class SessionAdapter:
                 thread_id,
                 resume=resume,
                 max_result_len=self._max_result_len,
+                extractors=self._extractors,
             ):
                 session.push(data)
                 kind = data.get("type")

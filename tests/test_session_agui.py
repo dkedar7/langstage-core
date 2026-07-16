@@ -89,6 +89,59 @@ async def test_tool_frames():
     assert ends and ends[0]["result"] == "Sunny, 72F"
 
 
+# ── Extractors reach the web/task-board surface (gh #96) ─────────────────────
+
+
+async def test_constructor_accepts_extractors_param():
+    """gh #96: `extractors=` must be a real, honored parameter — not silently
+    swallowed by ``**_legacy``. Before the fix it fell into `**_legacy` and the
+    signature exposed no `extractors`, so the misconfiguration failed silently."""
+    import inspect
+
+    assert "extractors" in inspect.signature(SessionAdapter.__init__).parameters
+
+
+class _WeatherExtractor:
+    tool_name = "get_weather"
+    extracted_type = "weather"
+
+    def extract(self, content):
+        return {"summary": str(content)} if content else None
+
+
+async def test_extractors_emit_extraction_frames():
+    """gh #96: extractors forwarded to the AG-UI producer, so the web/task-board
+    surface emits `extraction` frames too — parity with iter_event_frames /
+    iter_chunk_frames. Before the fix, extractors fell into ``**_legacy`` and were
+    dropped, so no `extraction` frame ever reached the SSE stream."""
+    from langgraph.prebuilt import create_react_agent
+
+    adapter = SessionAdapter(
+        graph=create_react_agent(_FakeToolModel(), [get_weather]),
+        extractors=[_WeatherExtractor()],
+    )
+    session = adapter.submit_message(None, "weather?")
+    await session.current_task
+    frames = _drain(session.event_queue)
+    extraction = [f for f in frames if f.get("type") == "extraction"]
+    assert extraction, f"no extraction frame emitted: {[f.get('type') for f in frames]}"
+    assert extraction[0]["tool_name"] == "get_weather"
+    assert extraction[0]["extracted_type"] == "weather"
+    assert extraction[0]["data"] == {"summary": "Sunny, 72F"}
+
+
+async def test_no_extractors_emits_no_extraction_frame():
+    """Opt-in + backward compatible: with no extractors (the default) the SSE
+    stream carries no `extraction` frame, so existing web consumers are unchanged."""
+    from langgraph.prebuilt import create_react_agent
+
+    adapter = SessionAdapter(graph=create_react_agent(_FakeToolModel(), [get_weather]))
+    session = adapter.submit_message(None, "weather?")
+    await session.current_task
+    frames = _drain(session.event_queue)
+    assert not any(f.get("type") == "extraction" for f in frames), frames
+
+
 async def test_interrupt_then_resume_sets_outcomes():
     def gate(state):
         d = interrupt({"action_requests": [{"tool": "approve", "args": {"x": 1}}]})
