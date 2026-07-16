@@ -89,6 +89,34 @@ async def test_tool_frames():
     assert ends and ends[0]["result"] == "Sunny, 72F"
 
 
+async def test_extractors_are_forwarded_to_event_frames():
+    from langgraph.prebuilt import create_react_agent
+
+    class WeatherExtractor:
+        tool_name = "get_weather"
+        extracted_type = "weather"
+
+        def extract(self, content):
+            return {"forecast": content}
+
+    adapter = SessionAdapter(
+        graph=create_react_agent(_FakeToolModel(), [get_weather]),
+        extractors=[WeatherExtractor()],
+    )
+    session = adapter.submit_message(None, "weather?")
+    await session.current_task
+    frames = _drain(session.event_queue)
+    extractions = [frame for frame in frames if frame["type"] == "extraction"]
+    assert extractions == [
+        {
+            "type": "extraction",
+            "tool_name": "get_weather",
+            "extracted_type": "weather",
+            "data": {"forecast": "Sunny, 72F"},
+        }
+    ]
+
+
 async def test_interrupt_then_resume_sets_outcomes():
     def gate(state):
         d = interrupt({"action_requests": [{"tool": "approve", "args": {"x": 1}}]})

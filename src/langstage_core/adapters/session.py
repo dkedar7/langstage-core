@@ -68,13 +68,8 @@ class SessionAdapter:
 
     Attributes:
         graph: A compiled LangGraph graph (with a checkpointer for resumption).
-        stream_mode: Stream mode for ``astream`` and the parser. Defaults to
-            dual mode so content streams token-by-token while tool/interrupt
-            events arrive complete.
-        max_result_len: Max length for serialized tool results (see
-            :func:`event_to_dict`).
-        parser_kwargs: Extra kwargs forwarded to each ``StreamParser``
-            (e.g. ``skip_tools``, custom ``extractors`` via registration).
+        max_result_len: Max length for serialized tool results.
+        extractors: Tool extractors forwarded to :func:`iter_event_frames`.
 
     Example:
         adapter = SessionAdapter(graph=agent)
@@ -98,10 +93,12 @@ class SessionAdapter:
         *,
         graph: Any,
         max_result_len: int = 500,
+        extractors: Any = (),
         **_legacy: Any,  # accepts + ignores the removed stream_mode/agui/parser kwargs
     ):
         self._graph = graph
         self._max_result_len = max_result_len
+        self._extractors = extractors
         self._sessions: dict[str, Session] = {}
         # AG-UI-only since langstage-core 1.0 (ADR 0003): turns stream through the
         # in-process AG-UI adapter (``agui.iter_event_frames``) — the wrapped agent
@@ -238,6 +235,7 @@ class SessionAdapter:
                 thread_id,
                 resume=resume,
                 max_result_len=self._max_result_len,
+                extractors=self._extractors,
             ):
                 session.push(data)
                 kind = data.get("type")
