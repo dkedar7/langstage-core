@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.20] - 2026-07-16
+
+### Fixed
+- **`SessionAdapter` silently dropped the `extractors` argument, so the web / task-board surface
+  could never emit `extraction` frames (gh #96).** `SessionAdapter` is the streaming engine behind
+  the web app + task board, yet its `__init__` accepted only `graph` / `max_result_len` and funneled
+  everything else into `**_legacy` — so `SessionAdapter(graph=g, extractors=[...])` was accepted
+  without error but the extractors were discarded, and `_produce` called `iter_event_frames(...)`
+  with no `extractors=`. Every *other* surface (CLI/Jupyter via `iter_chunk_frames`, VS Code via
+  `iter_event_frames`) could pass `extractors=[...]` and render skill/memory/todo/`display_inline`
+  callouts, but the headline web/task-board surface could not — a documented public feature was
+  unreachable there, and the misconfiguration failed silently. `SessionAdapter.__init__` now accepts
+  an `extractors=[...]` iterable and forwards it into `iter_event_frames`, so the SSE stream carries
+  `extraction` frames for matching tools — parity with `iter_event_frames` / `iter_chunk_frames`
+  (same by-tool-name dispatch, same `"*"`-sentinel `GenericToolExtractor` fallback). It stays opt-in:
+  with no `extractors` (the default), the stream is unchanged, so existing consumers see no new
+  frames. The stale class docstring (which still referenced the retired
+  `stream_mode` / `parser_kwargs` / `StreamParser` / `event_to_dict` layer) now documents the real
+  `extractors` argument.
+
 ## [1.0.19] - 2026-07-14
 
 ### Fixed
