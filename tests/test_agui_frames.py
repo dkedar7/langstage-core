@@ -480,3 +480,116 @@ async def test_chunk_frames_node_exception_becomes_terminal_error_frame():
     assert frames[-1]["status"] == "error", frames
     assert "RuntimeError" in frames[-1]["error"] and "model call failed" in frames[-1]["error"]
     assert not any(f.get("status") == "complete" for f in frames), frames
+
+
+# --- gh #102: `max_result_len` is honored on BOTH `iter_*` mappings. The event wire has
+# always capped its `tool_end` result at 500 with a `…(truncated)` marker; the chunk wire —
+# the one the README assigns to the CLI and Jupyter surfaces — emitted the full result and
+# had no `max_result_len` parameter at all, so a large tool blob flooded the terminal with
+# no knob to bound it. Same parity-gap class as #92 (`extractors`). ---
+
+def _big_result_graph(size=2000):
+    """A graph whose single tool returns a `size`-char blob — the file read / search dump /
+    API response that floods a terminal when the wire doesn't cap it."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    @tool
+    def big(q: str) -> str:
+        """Return a big result."""
+        return "X" * size
+
+    def call(state):
+        return {
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "big", "id": "b1", "args": {"q": "go"}}])
+            ]
+        }
+
+    b = StateGraph(MessagesState)
+    b.add_node("call", call)
+    b.add_node("tools", ToolNode([big]))
+    b.add_edge(START, "call")
+    b.add_edge("call", "tools")
+    b.add_edge("tools", END)
+    return b.compile()
+
+
+async def _chunk_tool_results(agent, thread_id, **kw):
+    frames = await _collect(iter_chunk_frames(agent, "go", thread_id, **kw))
+    return [f["tool_result"] for f in frames if "tool_result" in f]
+
+
+async def test_iter_chunk_frames_accepts_max_result_len_param():
+    # The knob the report asks for: `max_result_len` must exist on the chunk mapping, with
+    # the same default as its counterpart, so the two signatures agree.
+    import inspect
+
+    params = inspect.signature(iter_chunk_frames).parameters
+    assert "max_result_len" in params
+    assert params["max_result_len"].default == 500
+    assert (
+        params["max_result_len"].default
+        == inspect.signature(iter_event_frames).parameters["max_result_len"].default
+    )
+
+
+async def test_iter_chunk_frames_truncates_tool_result_by_default():
+    # Before the fix this yielded all 2000 characters, uncapped, straight to the terminal.
+    results = await _chunk_tool_results(build_agent(_big_result_graph()), "c102a")
+    assert results, "no tool_result chunk emitted"
+    assert len(results[0]) == 500 + len("…(truncated)")
+    assert results[0].endswith("…(truncated)")
+    assert results[0][:500] == "X" * 500
+
+
+async def test_iter_chunk_frames_truncation_matches_iter_event_frames():
+    # The whole point of #102: the counterparts must produce the SAME capped string, so
+    # neither marker nor boundary can drift again.
+    agent = build_agent(_big_result_graph())
+    chunk = (await _chunk_tool_results(agent, "c102b"))[0]
+    event_frames = await _collect(iter_event_frames(agent, "go", "e102b"))
+    event = [f["result"] for f in event_frames if f.get("type") == "tool_end"][0]
+    assert chunk == event
+
+
+async def test_iter_chunk_frames_honors_custom_max_result_len():
+    results = await _chunk_tool_results(build_agent(_big_result_graph()), "c102c", max_result_len=10)
+    assert results[0] == "X" * 10 + "…(truncated)"
+
+
+async def test_iter_chunk_frames_leaves_short_result_untouched():
+    # The boundary: a result at or under the cap is emitted byte-identical, with no marker —
+    # so every existing CLI/Jupyter consumer of a normal-sized result is unchanged.
+    results = await _chunk_tool_results(build_agent(_big_result_graph(size=500)), "c102d")
+    assert results[0] == "X" * 500
+    assert "(truncated)" not in results[0]
+
+
+async def test_iter_chunk_frames_extractor_still_sees_the_full_result():
+    # Truncation is a *display* concern: the extractor parses the payload, so it must keep
+    # receiving the untruncated content (iter_event_frames feeds its extractor the raw
+    # content for the same reason). Capping the extractor's input would corrupt parsed data.
+    from langstage_core import GenericToolExtractor
+
+    frames = await _collect(
+        iter_chunk_frames(
+            build_agent(_big_result_graph()), "go", "c102e", extractors=[GenericToolExtractor()]
+        )
+    )
+    extraction = [f["extraction"] for f in frames if "extraction" in f]
+    assert extraction, f"no extraction chunk emitted: {frames}"
+    assert extraction[0]["data"] == {"content": "X" * 2000}
+
+
+async def test_truncate_result_passes_non_str_through_untouched():
+    # A non-str tool result (a dict/list/None a fake or future adapter yields) must not be
+    # sliced — `{...}[:500]` is a TypeError. AG-UI types `content` as str, so this is the
+    # defensive path both mappings share.
+    from langstage_core.agui import _truncate_result
+
+    assert _truncate_result({"a": 1}, 1) == {"a": 1}
+    assert _truncate_result([1, 2, 3], 1) == [1, 2, 3]
+    assert _truncate_result(None, 1) is None
