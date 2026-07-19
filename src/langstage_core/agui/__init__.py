@@ -285,6 +285,28 @@ def _normalize_interrupt(payload, default_decisions=_DEFAULT_DECISIONS):
     return [], [], list(default_decisions)
 
 
+def _truncate_result(result, max_result_len):
+    """Cap a tool result at ``max_result_len``, appending the ``…(truncated)`` marker.
+
+    The single implementation both ``iter_*`` mappings call, so the two counterparts
+    can't drift on truncation the way they did before gh #102 (``iter_event_frames``
+    capped; ``iter_chunk_frames`` — the CLI/Jupyter wire, where an unbounded blob is
+    arguably *more* harmful — emitted the full result with no knob at all).
+
+    Boundary: a result of exactly ``max_result_len`` or shorter is returned unchanged
+    and unmarked; a longer one is sliced to ``max_result_len`` *and then* marked, so
+    the yielded string is ``max_result_len`` + 12 characters.
+
+    A non-``str`` result is passed through untouched rather than sliced. AG-UI types
+    ``ToolCallResultEvent.content`` as ``str``, so this is defensive — but the chunk
+    wire yields ``content`` as-is (only the event wire coerces with ``str()``), and
+    slicing e.g. a dict a fake or future adapter produced would raise ``TypeError``.
+    """
+    if isinstance(result, str) and len(result) > max_result_len:
+        return result[:max_result_len] + "…(truncated)"
+    return result
+
+
 def _unwrap_resume(resume):
     """Return the raw resume payload, accepting either the payload OR a langgraph
     ``Command`` built by :func:`create_resume_input`.
@@ -438,9 +460,7 @@ async def iter_event_frames(
                     "node": current_node,
                 }
             elif t == "ToolCallResultEvent":
-                result = str(getattr(ev, "content", ""))
-                if len(result) > max_result_len:
-                    result = result[:max_result_len] + "…(truncated)"
+                result = _truncate_result(str(getattr(ev, "content", "")), max_result_len)
                 name = tool_names.get(ev.tool_call_id, "tool")
                 is_error = errored_tools.get(name, 0) > 0
                 if is_error:
@@ -531,6 +551,7 @@ async def iter_chunk_frames(
     thread_id: str,
     *,
     resume: Any = None,
+    max_result_len: int = 500,
     extractors: Any = (),
     state: Any = None,
 ):
@@ -542,6 +563,13 @@ async def iter_chunk_frames(
     for surfaces on the ``stream_graph_updates`` wire (the cli and Jupyter render
     loops). ``resume`` rides ``forwarded_props.command.resume``; ``state`` seeds the
     graph input (for agents whose input carries more than ``messages``).
+
+    ``max_result_len`` caps each ``tool_result`` chunk exactly as it caps
+    :func:`iter_event_frames`' ``tool_end`` frame — same default (500), same
+    ``…(truncated)`` marker, one shared :func:`_truncate_result`. Before gh #102 this
+    mapping had no such parameter and emitted the full result, so a tool returning a
+    large blob (a file read, a search dump) flooded the terminal/notebook with no way
+    to bound it — on the very wire the README assigns to the CLI and Jupyter surfaces.
 
     ``extractors`` is the same optional iterable of
     :class:`~langstage_core.extractors.base.ToolExtractor` that :func:`iter_event_frames`
@@ -629,7 +657,15 @@ async def iter_chunk_frames(
                     args = {"_raw": tc["args"]}
                 yield {"status": "streaming", "tool_calls": [{"name": tc["name"], "args": args}]}
             elif t == "ToolCallResultEvent":
-                yield {"status": "streaming", "tool_result": getattr(ev, "content", "")}
+                # Cap the result the way the event wire has always capped its `tool_end`
+                # frame (gh #102) — the CLI/Jupyter render loops read this chunk straight
+                # to the terminal. The extractor below still sees the FULL content: it
+                # parses a payload, and truncation is a display concern (iter_event_frames
+                # feeds its extractor the raw content for the same reason).
+                yield {
+                    "status": "streaming",
+                    "tool_result": _truncate_result(getattr(ev, "content", ""), max_result_len),
+                }
                 # Run the matching extractor over the tool result and, on a non-None
                 # return, emit an `extraction` chunk — parity with iter_event_frames'
                 # `extraction` frame so the CLI/Jupyter surfaces can render the same

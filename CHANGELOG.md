@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.22] - 2026-07-19
+
+### Fixed
+- **`iter_chunk_frames` ignored `max_result_len`, so the CLI/Jupyter wire emitted tool results
+  uncapped with no knob to bound them (gh #102).** The two `iter_*` mappings are documented
+  counterparts on the same wire vocabulary, but they disagreed on tool-result truncation:
+  `iter_event_frames` capped each result at `max_result_len` (default 500) and appended a
+  `…(truncated)` marker, while `iter_chunk_frames` yielded `ToolCallResultEvent.content` straight
+  through and **had no `max_result_len` parameter at all** — there was no way to cap it, not even
+  by opting in. The asymmetry pointed exactly the wrong way: the README assigns `iter_chunk_frames`
+  to *"the CLI and Jupyter surfaces"* ("terminal-friendly chunk dicts"), so the one wire that renders
+  directly into a terminal or notebook cell was the one with no bound, while the event wire —
+  consumed by the web/VS Code surfaces that already paginate and scroll — was protected. A tool
+  returning a large blob (a file read, a search result set, an API dump) therefore flooded the
+  render loop unbounded: a 2 MB result is a 2 MB wall of text in the user's terminal, and the
+  documented fix (pass `max_result_len=`) raised `TypeError: unexpected keyword argument`.
+  `iter_chunk_frames` now takes the same `max_result_len: int = 500` and truncates its
+  `tool_result` chunk identically, so the counterparts agree by default and the terminal surfaces
+  inherit the protection `SessionAdapter` has always had. The truncation itself moved into one
+  shared `_truncate_result()` that both mappings call, rather than a second inline copy of the
+  slice-and-mark — this is the third parity gap between the pair (after `extractors` in #92 and
+  the `error` frame in #93), and a duplicated implementation is what let the two drift in the
+  first place. Two boundaries are deliberate. A result at or under the cap is emitted
+  byte-identical with no marker, so every existing CLI/Jupyter consumer of a normal-sized result
+  is untouched. And the *extractor* still receives the full, untruncated content: truncation is a
+  display concern, so capping the extractor's input would corrupt the payload it parses — the
+  event wire feeds its extractor the raw content for the same reason. A non-`str` result is passed
+  through rather than sliced (AG-UI types `content` as `str`, so this is defensive — but the chunk
+  wire yields `content` as-is where the event wire coerces with `str()`, and slicing a dict would
+  raise `TypeError`).
+
 ## [1.0.21] - 2026-07-18
 
 ### Fixed
