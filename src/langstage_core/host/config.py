@@ -115,6 +115,10 @@ _malformed_toml: set[str] = set()
 # Dedupe the "ignoring malformed config" notice — _read_toml is called more than once
 # per path (loader + the per-file source-labeling re-read), which double-warned (#61).
 _warned_malformed_toml: set[str] = set()
+# Same dedupe for a TOML value of the wrong TYPE (below), keyed on (dotted key, value):
+# several surfaces each call resolve() in one process (import-time module constants,
+# --show-config, the launcher), and one typo shouldn't print the same note three times.
+_warned_malformed_toml_value: set[tuple[str, str]] = set()
 
 
 def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
@@ -381,8 +385,15 @@ class HostConfig:
             if tkey is not None:
                 tv = _get_dotted(toml_data, tkey)
                 if tv is not None:
-                    val = _coerce(f, tv)
-                    src = f"toml ({toml_paths[-1].name})" if toml_paths else "toml"
+                    try:
+                        val = _coerce(f, tv)
+                    except (ValueError, TypeError) as exc:
+                        # An uncoercible value keeps the default AND the "default"
+                        # source, so --show-config can never present an unusable
+                        # value as a live TOML setting. (gh langstage-jupyter #78)
+                        _warn_malformed_toml_value(tkey, tv, exc, val, toml_paths)
+                    else:
+                        src = f"toml ({toml_paths[-1].name})" if toml_paths else "toml"
 
             if name in env_map:
                 var, caster = env_map[name]
@@ -482,8 +493,94 @@ class HostConfig:
         return "\n".join(lines)
 
 
+_NUMERIC_TYPES: dict[str, type] = {"int": int, "float": float}
+
+
+def _numeric_field_type(f: Any) -> type | None:
+    """Return ``int``/``float`` if the field declares a plain numeric type, else None.
+
+    Prefers the annotation (the declared type is the authority) and falls back to
+    the default's type, so it works whether or not the declaring module uses
+    ``from __future__ import annotations``.
+
+    ``bool`` is deliberately never returned even though it is a subclass of
+    ``int``: a bool *field* must keep accepting TOML ``true``/``false`` untouched,
+    and a bool supplied *for* a numeric field is malformed input, not ``1``.
+    """
+    ann = getattr(f, "type", None)
+    if isinstance(ann, type):
+        if ann is bool:
+            return None
+        if ann in (int, float):
+            return ann
+    elif isinstance(ann, str) and ann in _NUMERIC_TYPES:
+        return _NUMERIC_TYPES[ann]
+    default = getattr(f, "default", None)
+    if isinstance(default, bool):
+        return None
+    if isinstance(default, (int, float)):
+        return type(default)
+    return None
+
+
 def _coerce(f: Any, value: Any) -> Any:
-    """Coerce a TOML value to the field's expected shape (Path fields only)."""
+    """Coerce a TOML value to the field's declared shape (Path and numeric fields).
+
+    TOML is typed, but nothing checked that a value's type matched the field it
+    landed in — only ``Path`` fields were coerced, and everything else was passed
+    through verbatim. So the single most common TOML mistake, quoting a number
+    (``execute_timeout = "300"``), yielded the Python ``str`` ``'300'`` for a field
+    declared ``float``: ``--show-config`` strips the quotes so it looked correct,
+    and the defect surfaced far away as a raw ``TypeError`` the first time
+    something did arithmetic on it, with no pointer back to ``langstage.toml``.
+
+    Numeric fields are now cast, so a value that can sensibly be coerced is
+    (``"300"`` -> ``300.0``). One that can't (``"warm"``, ``true``, a table)
+    raises ``ValueError``/``TypeError``; ``resolve()`` catches it, keeps the
+    default, and prints the same one-line ``note: ignoring malformed ...; using
+    default ... instead.`` the numeric env casters and malformed-syntax TOML
+    (gh #42) already emit. (gh langstage-jupyter #78)
+    """
     if isinstance(getattr(f, "default", None), Path) and not isinstance(value, Path):
         return Path(value)
+
+    numeric = _numeric_field_type(f)
+    if numeric is not None:
+        # Check bool BEFORE the isinstance(value, numeric) fast path: bool subclasses
+        # int, so `temperature = true` would otherwise sail through (or coerce to 1.0).
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise TypeError(f"expected {numeric.__name__}, got {type(value).__name__}")
+        if isinstance(value, numeric):
+            return value
+        coerced = numeric(value)
+        # Reject a fractional value for an int field rather than silently truncating
+        # it. `port = 8050.7` -> 8050 would be exactly the defect this fix exists to
+        # close: a wrong-typed value quietly accepted as something the user did not
+        # write. An integral float (`8050.0`, or a config generator's "8050.0") is
+        # unambiguous, so it still coerces. (gh langstage-jupyter #78)
+        if numeric is int and float(value) != coerced:
+            raise ValueError(f"expected int, got non-integral {value!r}")
+        return coerced
     return value
+
+
+def _warn_malformed_toml_value(
+    key: str, value: Any, exc: Exception, default: Any, paths: list[Path]
+) -> None:
+    """One-line stderr note when a TOML value can't be coerced to its field's type.
+
+    Mirrors the numeric env casters' note and #42's malformed-syntax note: name what
+    was ignored, why, and what is used instead. It also names the file, because the
+    whole point of gh langstage-jupyter #78 is that the user was never pointed back
+    at ``langstage.toml``. ASCII-only so it can't crash a cp1252 Windows console.
+    """
+    dedupe = (key, repr(value))
+    if dedupe in _warned_malformed_toml_value:
+        return
+    _warned_malformed_toml_value.add(dedupe)
+    where = f" in {paths[-1]}" if paths else ""
+    print(
+        f"note: ignoring malformed {key}={value!r}{where} "
+        f"({type(exc).__name__}: {exc}); using default {default!r} instead.",
+        file=sys.stderr,
+    )
