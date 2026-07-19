@@ -118,11 +118,30 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    # Resolve the spec BEFORE announcing success. serve() loads the spec itself, so
+    # an unloadable one (typo'd module, missing attribute, nonexistent file — the
+    # most common CLI mistake) used to surface as a raw traceback *after* a banner
+    # claiming the server was already up. Loading here gives that case the same
+    # clean one-line stderr treatment as its two siblings above — the missing
+    # [agui] extra and the no-spec-at-all path. load_agent_spec() already raises
+    # descriptive errors, so the message needs no embellishment. (gh #100)
+    from ..host import load_agent_spec
+
+    try:
+        graph = load_agent_spec(spec)
+    # ImportError covers ModuleNotFoundError, OSError covers FileNotFoundError, and
+    # ValueError is the malformed-spec ("no :attr suffix") case load_agent_spec raises.
+    except (ImportError, AttributeError, OSError, ValueError) as exc:
+        print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
+        return 2
+
     name = args.name or ("Demo Agent" if args.demo else DEFAULT_AGENT_NAME)
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
     print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
-    serve(spec, host=cfg.host, port=cfg.port, path=args.path, name=name)
+    # Pass the loaded graph, not the spec: serve() accepts either, and handing it
+    # the graph keeps the module from being imported (and its side effects run) twice.
+    serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name)
     return 0
 
 

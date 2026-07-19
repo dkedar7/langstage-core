@@ -343,3 +343,158 @@ class TestFromEnvBackCompat:
         monkeypatch.delenv("DEEPAGENT_PORT", raising=False)
         # from_env ignores TOML even though deepagents.toml is in cwd
         assert HostConfig.from_env().port == 8050
+
+
+@dataclass
+class NumericHost(HostConfig):
+    """Mirrors langstage-jupyter's LabConfig numeric fields — the ones gh
+    langstage-jupyter #78 was filed against."""
+
+    model_temperature: float = 0.0
+    execute_timeout: float = 300.0
+    virtual_mode: bool = False
+    _TOML: ClassVar[dict] = {
+        "model_temperature": "model.temperature",
+        "execute_timeout": "jupyter.execute_timeout",
+        "virtual_mode": "jupyter.virtual_mode",
+    }
+
+
+class TestTomlValueTypes:
+    """gh langstage-jupyter #78: `_coerce` handled Path fields only, so a
+    syntactically-valid TOML value of the WRONG TYPE was accepted verbatim.
+    Quoting a number — `execute_timeout = "300"`, the most common TOML mistake —
+    handed downstream code the str '300' for a field declared float. --show-config
+    strips the quotes, so the misconfiguration was invisible in the very tool built
+    to inspect it, and it surfaced far from the cause as a raw TypeError the first
+    time something did arithmetic on it. Numeric fields are now coerced when they
+    sensibly can be, and otherwise degrade to the default with the same one-line
+    `note: ignoring malformed ...; using default ...` the numeric env casters and
+    malformed-syntax TOML (#42) emit.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_note_dedupe(self):
+        # The note is deduped per (key, value) for the whole process, so clear it
+        # or a second test asserting the same note would see nothing. getattr'd so
+        # that reverting the fix makes these tests fail on the *behaviour* rather
+        # than erroring out here on a missing symbol.
+        import langstage_core.host.config as config_mod
+
+        seen = getattr(config_mod, "_warned_malformed_toml_value", set())
+        seen.clear()
+        yield
+        seen.clear()
+
+    def test_quoted_number_is_coerced_to_the_declared_type(self, isolated_global, tmp_path):
+        _toml(tmp_path, '[jupyter]\nexecute_timeout = "300"\n[model]\ntemperature = "0.5"\n')
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+
+        assert cfg.execute_timeout == 300.0
+        assert isinstance(cfg.execute_timeout, float)
+        assert cfg.model_temperature == 0.5
+        assert isinstance(cfg.model_temperature, float)
+        # Coercion succeeded, so TOML is still (correctly) credited as the source.
+        assert cfg.sources["execute_timeout"].startswith("toml")
+
+    def test_coerced_value_survives_downstream_arithmetic(self, isolated_global, tmp_path):
+        # The headline crash from the issue: notebook_tools.py's
+        # `deadline = time.monotonic() + EXECUTE_TIMEOUT` died with
+        # "unsupported operand type(s) for +: 'float' and 'str'".
+        _toml(tmp_path, '[jupyter]\nexecute_timeout = "300"\n')
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert 1000.0 + cfg.execute_timeout == 1300.0
+
+    def test_quoted_int_is_coerced_for_an_int_field(self, isolated_global, tmp_path):
+        _toml(tmp_path, '[server]\nport = "8123"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 8123
+        assert isinstance(cfg.port, int)
+
+    def test_uncoercible_string_falls_back_to_default_with_a_note(
+        self, isolated_global, tmp_path, capsys
+    ):
+        _toml(tmp_path, '[model]\ntemperature = "warm"\n')
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+
+        assert cfg.model_temperature == 0.0
+        # --show-config must not present an unusable value as a live TOML setting:
+        # the row shows the default value attributed to [default], never 'warm'.
+        assert cfg.sources["model_temperature"] == "default"
+        row = next(
+            line for line in cfg.describe().splitlines() if "model_temperature" in line
+        )
+        assert "[default]" in row and "0.0" in row and "warm" not in row
+
+        err = capsys.readouterr().err
+        assert "note: ignoring malformed model.temperature='warm'" in err
+        assert "using default 0.0 instead." in err
+        assert "langstage.toml" in err or "deepagents.toml" in err  # points back at the file
+        err.encode("cp1252")  # ASCII-only — must not crash a cp1252 console
+
+    def test_bool_for_a_numeric_field_is_malformed_not_one(
+        self, isolated_global, tmp_path, capsys
+    ):
+        # bool is a subclass of int in Python, so `temperature = true` would
+        # otherwise sail through (or coerce to 1.0) — a silently wrong model setting.
+        _toml(tmp_path, "[model]\ntemperature = true\n")
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+
+        assert cfg.model_temperature == 0.0
+        assert cfg.model_temperature is not True
+        assert cfg.sources["model_temperature"] == "default"
+        err = capsys.readouterr().err
+        assert "ignoring malformed model.temperature=True" in err
+        assert "expected float, got bool" in err
+
+    def test_genuine_bool_field_still_accepts_toml_booleans(self, isolated_global, tmp_path, capsys):
+        # The converse guard: a real bool field must be untouched by all of this.
+        _toml(tmp_path, "[jupyter]\nvirtual_mode = true\n")
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert cfg.virtual_mode is True
+        assert cfg.sources["virtual_mode"].startswith("toml")
+
+        _toml(tmp_path, "[jupyter]\nvirtual_mode = false\n")
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert cfg.virtual_mode is False
+        assert cfg.sources["virtual_mode"].startswith("toml")
+        assert "ignoring malformed" not in capsys.readouterr().err
+
+    def test_non_scalar_for_a_numeric_field_degrades(self, isolated_global, tmp_path, capsys):
+        _toml(tmp_path, "[server]\nport = [1, 2]\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 8050
+        assert cfg.sources["port"] == "default"
+        assert "expected int, got list" in capsys.readouterr().err
+
+    def test_correctly_typed_toml_is_untouched(self, isolated_global, tmp_path, capsys):
+        # No behaviour change for a clean config — and no spurious notes.
+        _toml(tmp_path, '[server]\nport = 7000\n[agent]\nspec = "x.py:graph"\n'
+                        "[jupyter]\nexecute_timeout = 45.5\n")
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 7000
+        assert cfg.agent_spec == "x.py:graph"
+        assert cfg.execute_timeout == 45.5
+        assert "ignoring malformed" not in capsys.readouterr().err
+
+    def test_int_literal_widens_for_a_float_field(self, isolated_global, tmp_path):
+        # TOML has no float literal for a whole number, so `temperature = 1` parses
+        # as int; a field declared float should get 1.0, not the int.
+        _toml(tmp_path, "[model]\ntemperature = 1\n")
+        cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert cfg.model_temperature == 1.0
+        assert isinstance(cfg.model_temperature, float)
+
+    def test_path_fields_still_coerce(self, isolated_global, tmp_path):
+        # The pre-existing Path behaviour must be preserved.
+        _toml(tmp_path, '[workspace]\nroot = "/tmp/ws"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert isinstance(cfg.workspace_root, Path)
+
+    def test_note_is_emitted_once_per_bad_value(self, isolated_global, tmp_path, capsys):
+        # Several surfaces each call resolve() in one process; one typo must not
+        # print the same note three times (same dedupe as #61's malformed-file note).
+        _toml(tmp_path, '[model]\ntemperature = "warm"\n')
+        for _ in range(3):
+            NumericHost.resolve(env={}, toml_start=tmp_path)
+        assert capsys.readouterr().err.count("ignoring malformed model.temperature") == 1

@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.0.21] - 2026-07-18
+
+### Fixed
+- **`langstage-agui --agent <spec>` printed a fake `Serving '<spec>' over AG-UI at <url>` success
+  banner and *then* died with a raw traceback whenever the spec was unloadable (gh #100).** The
+  banner was printed unconditionally, and the spec was only resolved later — inside `serve()`, which
+  is where `load_agent_spec()` runs. So the single most likely CLI mistake (a typo'd module, a
+  missing attribute, a nonexistent file) produced the worst possible output: a line claiming the
+  server was already up at a URL, immediately followed by an unhandled `ModuleNotFoundError` /
+  `AttributeError` / `FileNotFoundError` and exit 1. That is precisely the
+  fake-success-then-traceback failure the *same function* already went out of its way to prevent for
+  its two sibling cases — the missing `[agui]` extra (`ensure_available()` fails fast to stderr
+  "so the user doesn't see a fake success line followed by a traceback") and the no-spec-at-all path
+  (`error: no agent spec — ...`, exit 2) — leaving the CLI internally inconsistent on its most
+  common error. `main()` now resolves the spec *before* announcing anything: on failure it prints a
+  clean one-line `error: could not load agent '<spec>': <reason>` to stderr and exits 2, matching
+  both siblings in style and exit code, with no banner and no traceback. `load_agent_spec()` already
+  raises descriptive errors, so the reason needs no embellishment. The happy path is unchanged — the
+  banner still prints and the server still starts — and because `serve()` accepts either a spec
+  string or an already-compiled graph, the pre-loaded graph is handed straight through, so the agent
+  module is imported exactly once and no import side effect runs twice.
+- **A wrong-*typed* value in `langstage.toml` was accepted verbatim, so `execute_timeout = "300"`
+  resolved to the Python `str` `'300'` for a field declared `float` (gh langstage-jupyter #78).**
+  `_coerce` coerced `Path` fields only and passed `int`/`float`/`bool` fields through untouched, so a
+  syntactically-valid TOML value of the wrong type was never checked against the field it landed in.
+  Quoting a number — one of the most common TOML mistakes — was therefore silently accepted, and
+  `--show-config` *strips the quotes*, making the misconfiguration visually indistinguishable from a
+  correct one in the very tool built to inspect it. The defect then surfaced far from its cause as a
+  raw `TypeError: unsupported operand type(s) for +: 'float' and 'str'` the first time a consumer did
+  arithmetic on the value, with nothing pointing back at `langstage.toml` or the offending key. The
+  prior fix for the identical hazard on the env side (langstage-jupyter #75) added a `_lenient_number`
+  wrapper but applied it only to that stage's env casters; its own suggested fix anticipated this
+  sibling and named the right layer, so the repair lands here in core where every stage inherits it
+  instead of in one host. Numeric fields are now cast to their declared type, so a coercible value is
+  coerced (`"300"` -> `300.0`, `"8123"` -> `8123`, and an int literal widens to `1.0` for a `float`
+  field). An uncoercible one (`"warm"`, a table, an array) keeps the default *and* the `default`
+  source attribution — so `--show-config` can never present an unusable value as a live TOML setting —
+  and emits the same one-line `note: ignoring malformed <key>=<value> in <file> (<Error>: ...); using
+  default <default> instead.` that the numeric env casters and malformed-syntax TOML (#42) already
+  print, now naming the file so the user is pointed back at their config. `bool` is handled
+  deliberately: because `bool` subclasses `int` in Python, `temperature = true` would otherwise
+  become `1.0`, so a bool supplied *for* a numeric field is treated as malformed — while a genuine
+  bool field keeps accepting TOML `true`/`false` untouched. The note is deduped per (key, value), as
+  several surfaces each resolve the config in one process. Correctly-typed configs behave exactly as
+  before and emit no notes.
+
 ## [1.0.20] - 2026-07-16
 
 ### Fixed
