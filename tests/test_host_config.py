@@ -477,6 +477,26 @@ class TestTomlValueTypes:
         assert cfg.execute_timeout == 45.5
         assert "ignoring malformed" not in capsys.readouterr().err
 
+    def test_fractional_value_for_an_int_field_is_rejected(
+        self, isolated_global, tmp_path, capsys
+    ):
+        # Truncating 8050.7 -> 8050 would be the very defect this fix closes: a
+        # wrong-typed value silently accepted as something the user never wrote.
+        _toml(tmp_path, "[server]\nport = 8050.7\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+
+        assert cfg.port == 8050  # the default, not a truncation of 8050.7
+        assert cfg.sources["port"] == "default"
+        assert "ignoring malformed" in capsys.readouterr().err
+
+    def test_integral_float_still_coerces_for_an_int_field(self, isolated_global, tmp_path):
+        # `8123.0` is unambiguous (and what some config generators emit), so it is
+        # coerced rather than rejected — only a fractional part is an error.
+        _toml(tmp_path, "[server]\nport = 8123.0\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 8123
+        assert isinstance(cfg.port, int)
+
     def test_int_literal_widens_for_a_float_field(self, isolated_global, tmp_path):
         # TOML has no float literal for a whole number, so `temperature = 1` parses
         # as int; a field declared float should get 1.0, not the int.

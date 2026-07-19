@@ -42,9 +42,12 @@
   print, now naming the file so the user is pointed back at their config. `bool` is handled
   deliberately: because `bool` subclasses `int` in Python, `temperature = true` would otherwise
   become `1.0`, so a bool supplied *for* a numeric field is treated as malformed — while a genuine
-  bool field keeps accepting TOML `true`/`false` untouched. The note is deduped per (key, value), as
-  several surfaces each resolve the config in one process. Correctly-typed configs behave exactly as
-  before and emit no notes.
+  bool field keeps accepting TOML `true`/`false` untouched. A **fractional** value for an `int`
+  field is likewise malformed rather than truncated: `port = 8050.7` silently becoming `8050` would
+  be the very defect this fix closes, a wrong-typed value quietly accepted as something the user did
+  not write. An integral float (`8123.0`) is unambiguous and still coerces. The note is deduped per
+  (key, value), as several surfaces each resolve the config in one process. Correctly-typed configs
+  behave exactly as before and emit no notes.
 
 ## [1.0.20] - 2026-07-16
 

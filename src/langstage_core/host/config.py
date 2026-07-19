@@ -552,7 +552,15 @@ def _coerce(f: Any, value: Any) -> Any:
             raise TypeError(f"expected {numeric.__name__}, got {type(value).__name__}")
         if isinstance(value, numeric):
             return value
-        return numeric(value)
+        coerced = numeric(value)
+        # Reject a fractional value for an int field rather than silently truncating
+        # it. `port = 8050.7` -> 8050 would be exactly the defect this fix exists to
+        # close: a wrong-typed value quietly accepted as something the user did not
+        # write. An integral float (`8050.0`, or a config generator's "8050.0") is
+        # unambiguous, so it still coerces. (gh langstage-jupyter #78)
+        if numeric is int and float(value) != coerced:
+            raise ValueError(f"expected int, got non-integral {value!r}")
+        return coerced
     return value
 
 
