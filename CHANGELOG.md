@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.0.26] - 2026-07-23
+
+### Added
+- **A one-shot "run a turn, get a typed result" helper over the `iter_*` mappings (gh #110).**
+  The library exposed exactly two consumers — `iter_event_frames` and `iter_chunk_frames`, both
+  *streaming* async generators. That's the right primitive for a live UI, but a large share of
+  real usage is *not* a live UI: a test, an eval/grading harness, a batch job, a `@tool` that
+  delegates to a sub-agent, a "run my agent once, give me the answer" script. Every one of those
+  wanted a single call that runs one turn and returns the result, so each hand-rolled the same
+  accumulator loop over `iter_event_frames` (collect `content` deltas, watch for `interrupt`,
+  map `complete` → outcome, catch `error`) — four copies in one dogfooding session. New
+  `langstage_core.agui.collect_event_frames(agent, message, thread_id, *, resume, max_result_len,
+  extractors, state)` (async) drives one turn and returns a typed `TurnResult` dataclass:
+  `text` (joined `content`), `tool_calls` (`[{name, args, id}]`), `extractions`
+  (`[{tool_name, extracted_type, data}]`), `reasoning`, `outcome`
+  (`"complete"`/`"interrupted"`/`"error"`), `interrupt` (the interrupt frame when paused),
+  `error` (the message when it failed), and `frames` (total seen). It takes the *same* kwargs as
+  `iter_event_frames` and forwards them unchanged, so it's a drop-in "I don't need the stream,
+  just the result." A chunk-wire counterpart `collect_chunk_frames` (same `TurnResult`, for
+  CLI/Jupyter parity) and a sync convenience `run_turn(graph_or_agent, message, *, thread_id=...)`
+  — which accepts a compiled graph **or** a prebuilt `LangGraphAgent` like `verify`, builds it if
+  needed, and runs under `asyncio.run` — round out the set, mirroring the `averify`/`verify`
+  async+sync pairing. Exported from `langstage_core.agui` (alongside `iter_event_frames` /
+  `verify`, not top-level). This makes asserting "message X yields answer Y / calls tool Z /
+  raises an interrupt" a one-liner in a test, directly serving the largest bug class in this
+  repo's history (the turn is wrong/empty).
+- **The `complete` / `interrupted` / `error` terminal-outcome rule now lives in ONE place
+  (gh #110).** `SessionAdapter._produce` already implemented the exact state machine (`error` ⇒
+  `error`; a `complete` after a pending `interrupt` ⇒ `interrupted`; else `complete`), but it was
+  welded to the session/queue object, so every non-streaming consumer reimplemented it and could
+  drift. Factored a small shared `_terminal_outcome(*, saw_interrupt, saw_error)` in
+  `langstage_core.agui`; `_produce`, both new collectors, and `verify()` all call it now, so the
+  rule is defined and tested once. (`_produce`'s `cancelled` outcome stays where it is — it's a
+  transport concern set on `asyncio.CancelledError`, not part of the frame-driven rule. `verify()`
+  is unchanged on every turn a probe actually produces: `outcome == "complete"` iff `not saw_error`
+  there, so its `ok` verdict is identical, now derived from the shared rule instead of an inline
+  `saw_complete and not saw_error`.)
+
+### Note
+- The sibling `langstage` package's `oneturn.py` (`complete_turn` / `run_turn_sync`) is a
+  *different* layer — it buffers a `SessionAdapter` for the web server's one-turn HTTP endpoint,
+  where the session/queue is needed. These core `collect_*` / `run_turn` helpers are the
+  lower-level, **session-free** collectors: they just iterate the `iter_*` mappings, no
+  `SessionAdapter`. Use these in tests/evals/scripts; the web endpoint keeps using its own.
+
 ## [1.0.25] - 2026-07-23
 
 ### Added
