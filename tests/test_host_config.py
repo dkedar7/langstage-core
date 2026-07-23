@@ -518,3 +518,64 @@ class TestTomlValueTypes:
         for _ in range(3):
             NumericHost.resolve(env={}, toml_start=tmp_path)
         assert capsys.readouterr().err.count("ignoring malformed model.temperature") == 1
+
+
+class TestMalformedEnvValue:
+    """A malformed numeric ENV var must degrade, not crash — the env-side sibling of
+    the TOML handling above (gh #104).
+
+    Before this, ``LANGSTAGE_PORT=abc`` raised an uncaught ``ValueError`` straight out
+    of ``resolve()`` and took down every entrypoint that resolves config. The env
+    layer was unguarded even though the module docstrings already advertised that the
+    "numeric env casters" emit a graceful note.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_note_dedupe(self):
+        import langstage_core.host.config as config_mod
+
+        seen = getattr(config_mod, "_warned_malformed_env_value", set())
+        seen.clear()
+        yield
+        seen.clear()
+
+    def test_malformed_numeric_env_does_not_crash(self, isolated_global):
+        # The headline repro: LANGSTAGE_PORT=abc used to raise out of resolve().
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "abc"}, use_toml=False)
+        assert cfg.port == 8050  # the built-in default
+        assert cfg.sources["port"] == "default"  # NOT env:LANGSTAGE_PORT
+
+    def test_malformed_env_warns_once_on_stderr(self, isolated_global, capsys):
+        for _ in range(3):
+            HostConfig.resolve(env={"LANGSTAGE_PORT": "abc"}, use_toml=False)
+        err = capsys.readouterr().err
+        assert err.count("ignoring malformed LANGSTAGE_PORT") == 1
+        assert "'abc'" in err
+
+    def test_malformed_env_does_not_clobber_a_valid_toml_value(
+        self, isolated_global, tmp_path, capsys
+    ):
+        """gh langstage-jupyter #83: a bad env var must fall through to the TOML
+        value that sits between env and default — not jump to the built-in default."""
+        _toml(tmp_path, "[server]\nport = 8123\n")
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "abc"}, toml_start=tmp_path)
+
+        assert cfg.port == 8123  # the langstage.toml value, NOT the default 8050
+        # ...and --show-config must credit TOML, never the rejected env var.
+        assert cfg.sources["port"].startswith("toml")
+        # the note names what it kept, and it isn't "default"
+        err = capsys.readouterr().err
+        assert "ignoring malformed LANGSTAGE_PORT" in err
+        assert "8123" in err and "default" not in err
+
+    def test_valid_env_still_wins_over_toml(self, isolated_global, tmp_path):
+        # Guard: the fix must not disturb the normal env-beats-toml precedence.
+        _toml(tmp_path, "[server]\nport = 8123\n")
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "9000"}, toml_start=tmp_path)
+        assert cfg.port == 9000
+        assert cfg.sources["port"].startswith("env")
+
+    def test_legacy_env_spelling_degrades_too(self, isolated_global):
+        cfg = HostConfig.resolve(env={"DEEPAGENT_PORT": "abc"}, use_toml=False)
+        assert cfg.port == 8050
+        assert cfg.sources["port"] == "default"

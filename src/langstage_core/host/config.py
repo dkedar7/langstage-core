@@ -119,6 +119,8 @@ _warned_malformed_toml: set[str] = set()
 # several surfaces each call resolve() in one process (import-time module constants,
 # --show-config, the launcher), and one typo shouldn't print the same note three times.
 _warned_malformed_toml_value: set[tuple[str, str]] = set()
+# Same dedupe for a malformed numeric ENV var (gh #104), keyed on (var, value).
+_warned_malformed_env_value: set[tuple[str, str]] = set()
 
 
 def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
@@ -406,8 +408,21 @@ class HostConfig:
                     if ev not in (None, "") and legacy != canonical:
                         _warn_legacy_env(legacy, canonical)
                 if ev is not None and ev != "":
-                    val = caster(ev)
-                    src = f"env:{used}"
+                    try:
+                        val = caster(ev)
+                        src = f"env:{used}"
+                    except (ValueError, TypeError) as exc:
+                        # A malformed numeric env var (LANGSTAGE_PORT=abc, an
+                        # unexpanded "$PORT", a stray "8050 x") used to raise an
+                        # uncaught error straight out of resolve() and crash every
+                        # entrypoint (gh #104). Degrade exactly like the TOML path
+                        # above: keep whatever was resolved so far -- crucially the
+                        # TOML value if one is set, NOT the built-in default -- so a
+                        # bad env var can't clobber a valid langstage.toml value
+                        # (gh langstage-jupyter #83), and leave src pointing at that
+                        # real source so --show-config never attributes the kept
+                        # value to the rejected env var.
+                        _warn_malformed_env_value(used, ev, exc, val, src)
 
             if name in overrides:
                 val = overrides[name]
@@ -562,6 +577,37 @@ def _coerce(f: Any, value: Any) -> Any:
             raise ValueError(f"expected int, got non-integral {value!r}")
         return coerced
     return value
+
+
+def _warn_malformed_env_value(
+    var: str, value: str, exc: Exception, kept: Any, kept_src: str
+) -> None:
+    """One-line stderr note when a numeric ENV var can't be cast to its field's type.
+
+    The env-side counterpart of :func:`_warn_malformed_toml_value` (gh #104). The env
+    layer had gone unguarded — a single bad char in ``LANGSTAGE_PORT`` raised straight
+    out of ``resolve()`` and crashed every entrypoint — even though this module's own
+    docstrings already advertised that the "numeric env casters" emit exactly this
+    note. Now they do.
+
+    Unlike the TOML note, this reports the value that is actually *kept* and where it
+    came from (``kept_src``), because the env layer sits above TOML: a rejected env
+    var falls back to the ``langstage.toml`` value if one is set, and only otherwise to
+    the default. Saying "using default" would be wrong (and would mask gh
+    langstage-jupyter #83). ASCII-only so it can't crash a cp1252 Windows console.
+    """
+    dedupe = (var, value)
+    if dedupe in _warned_malformed_env_value:
+        return
+    _warned_malformed_env_value.add(dedupe)
+    # "default X" when nothing else set it; "X (toml (...))" when a real config
+    # value is what the rejected env var falls back to.
+    kept_desc = f"default {kept!r}" if kept_src == "default" else f"{kept!r} ({kept_src})"
+    print(
+        f"note: ignoring malformed {var}={value!r} "
+        f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
+        file=sys.stderr,
+    )
 
 
 def _warn_malformed_toml_value(
