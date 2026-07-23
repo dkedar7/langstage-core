@@ -1,6 +1,6 @@
 [project]
 name = "langstage-core"
-version = "1.0.23"
+version = "1.0.24"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}

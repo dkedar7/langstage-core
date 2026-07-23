@@ -307,6 +307,87 @@ def _truncate_result(result, max_result_len):
     return result
 
 
+def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, step_nodes, current_node):
+    """Yield the not-yet-emitted items from a final ``MessagesSnapshotEvent``.
+
+    Shared by both ``iter_*`` mappings so the two wires can't drift on snapshot
+    handling. The snapshot branch used to yield **only** assistant text and drop
+    every message with empty content, so a turn whose messages are produced
+    *without token streaming* (a custom node calling ``model.invoke()``, a
+    non-streaming provider, a rule-based node) surfaced no tool call and no tool
+    result, and a tool-call-only ``AIMessage(content="", tool_calls=[...])``
+    rendered as a completely empty turn while ``--verify`` reported success
+    (gh #91). This walks assistant **and** tool messages and yields normalized
+    items each wire renders in its own vocabulary:
+
+      ``{"kind": "content", "text", "node"}``          — an assistant text message
+      ``{"kind": "tool_call", "name", "args", "id"}``  — a tool call not streamed
+      ``{"kind": "tool_result", "name", "raw", "id", "error"}`` — a result not streamed
+
+    Dedup mirrors how a fully-streamed turn already emitted things during the run,
+    so nothing double-renders: content by message id (``streamed_ids``), tool calls
+    by ``tool_call_id`` (``tool_names`` is populated only on the streaming
+    ``ToolCallStartEvent``), tool results by ``tool_call_id``
+    (``streamed_result_ids``). A non-streaming turn streamed none of these, so the
+    snapshot is the sole source and everything is emitted; a fully-streamed turn
+    finds them all already emitted and yields nothing.
+    """
+    import json
+
+    msgs = list(messages)
+    last_user = max(
+        (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
+        default=-1,
+    )
+    tail = msgs[last_user + 1:]
+    # Node mapping aligns to assistant *content* messages only (gh #43), so keep the
+    # index space the pre-#91 code used — interleaving tool messages must not shift it.
+    content_msgs = [
+        m for m in tail
+        if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
+    ]
+    offset = max(0, len(content_msgs) - len(step_nodes))
+    # Local name map so a tool result can still name its tool on a fully-snapshot turn,
+    # where ToolCallStart never populated the shared tool_names.
+    names = dict(tool_names)
+    ci = 0
+    for m in tail:
+        role = getattr(m, "role", None)
+        if role == "assistant":
+            for tc in getattr(m, "tool_calls", None) or []:
+                tcid = getattr(tc, "id", None)
+                fn = getattr(tc, "function", None)
+                name = getattr(fn, "name", "tool") if fn is not None else "tool"
+                if tcid is not None:
+                    names.setdefault(tcid, name)
+                if tcid in tool_names:
+                    continue  # already emitted via streaming ToolCall events
+                raw_args = (getattr(fn, "arguments", "") if fn is not None else "") or ""
+                try:
+                    args = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    args = {"_raw": raw_args}
+                yield {"kind": "tool_call", "name": name, "args": args, "id": tcid}
+            content = getattr(m, "content", None)
+            if content:
+                if getattr(m, "id", None) not in streamed_ids:
+                    idx = ci - offset
+                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                    yield {"kind": "content", "text": content, "node": node}
+                ci += 1
+        elif role == "tool":
+            tcid = getattr(m, "tool_call_id", None)
+            if tcid in streamed_result_ids:
+                continue  # already emitted via the streaming ToolCallResultEvent
+            yield {
+                "kind": "tool_result",
+                "name": names.get(tcid, "tool"),
+                "raw": getattr(m, "content", "") or "",
+                "id": tcid,
+                "error": bool(getattr(m, "error", None)),
+            }
+
+
 def _unwrap_resume(resume):
     """Return the raw resume payload, accepting either the payload OR a langgraph
     ``Command`` built by :func:`create_resume_input`.
@@ -400,6 +481,10 @@ async def iter_event_frames(
     streamed_ids: set[str] = set()
     tool_args: dict[str, str] = {}
     tool_names: dict[str, str] = {}
+    # Tool results already emitted via the streaming ToolCallResultEvent, so the
+    # final snapshot re-emits only the results a non-streaming turn never streamed
+    # (gh #91), the tool-frame counterpart of streamed_ids.
+    streamed_result_ids: set[str] = set()
     # The langgraph node currently executing, from StepStartedEvent — so a
     # multi-node graph's frames carry the real node instead of a fixed "agent",
     # letting renderers separate one node's output from the next (gh #43).
@@ -460,6 +545,7 @@ async def iter_event_frames(
                     "node": current_node,
                 }
             elif t == "ToolCallResultEvent":
+                streamed_result_ids.add(ev.tool_call_id)
                 result = _truncate_result(str(getattr(ev, "content", "")), max_result_len)
                 name = tool_names.get(ev.tool_call_id, "tool")
                 is_error = errored_tools.get(name, 0) > 0
@@ -476,7 +562,13 @@ async def iter_event_frames(
                 }
                 extractor = by_tool.get(name, default_extractor)
                 if extractor is not None:
-                    data = extractor.extract(getattr(ev, "content", ""))
+                    # A structured extractor parses raw content, so it must see the
+                    # full result. A display-passthrough one (GenericToolExtractor,
+                    # caps_content=True) echoes content verbatim, so feed it the
+                    # already-truncated `result` — otherwise its extraction frame
+                    # carries the full blob next to the capped tool_end (gh #106).
+                    ex_content = result if getattr(extractor, "caps_content", False) else getattr(ev, "content", "")
+                    data = extractor.extract(ex_content)
                     if data is not None:
                         yield {
                             "type": "extraction",
@@ -501,36 +593,40 @@ async def iter_event_frames(
                     "allowed_decisions": decisions,
                 }
             elif t == "MessagesSnapshotEvent":
-                # The final snapshot carries every assistant message the turn produced,
-                # including any a later node returned finished (non-streamed). Emit the
-                # ones NOT already streamed token-by-token — keyed by message id — so a
-                # mixed turn (an earlier node streams, a later node appends a finished
-                # AIMessage) renders the finished message too, instead of dropping it once
-                # anything streamed (gh #89). A fully-streamed turn skips them all (already
-                # emitted); a fully-snapshot turn emits them all (gh #67).
-                #
-                # The snapshot is the FULL thread (prior turns come from the checkpointer),
-                # so slice to what follows the last user message — otherwise the agent
-                # re-emits its entire history every turn (gh #67). Then map the trailing
-                # assistant messages back to the steps that produced them (gh #43); the
-                # index alignment uses the full assistant list so skipping streamed ones
-                # doesn't shift the node mapping.
-                msgs = list(ev.messages)
-                last_user = max(
-                    (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
-                    default=-1,
-                )
-                assistant = [
-                    m for m in msgs[last_user + 1:]
-                    if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
-                ]
-                offset = max(0, len(assistant) - len(step_nodes))
-                for i, m in enumerate(assistant):
-                    if getattr(m, "id", None) in streamed_ids:
-                        continue  # already emitted token-by-token; don't duplicate
-                    idx = i - offset
-                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                    yield {"type": "content", "content": m.content, "role": "assistant", "node": node}
+                # The final snapshot carries every message the turn produced. Emit the
+                # ones NOT already streamed — content, tool calls, AND tool results —
+                # via the shared _snapshot_items walk, so a non-streaming turn renders
+                # its tool call/result and a tool-call-only AIMessage isn't dropped
+                # (gh #91), while a mixed turn still emits a later node's finished
+                # AIMessage (gh #89) and a fully-streamed turn double-renders nothing.
+                for item in _snapshot_items(
+                    ev.messages,
+                    streamed_ids=streamed_ids,
+                    tool_names=tool_names,
+                    streamed_result_ids=streamed_result_ids,
+                    step_nodes=step_nodes,
+                    current_node=current_node,
+                ):
+                    if item["kind"] == "content":
+                        yield {"type": "content", "content": item["text"],
+                               "role": "assistant", "node": item["node"]}
+                    elif item["kind"] == "tool_call":
+                        # A snapshot tool call reconstructs the streaming tool_start;
+                        # its result arrives as a separate tool message -> tool_end below.
+                        yield {"type": "tool_start", "id": item["id"], "name": item["name"],
+                               "args": item["args"], "node": current_node}
+                    elif item["kind"] == "tool_result":
+                        result = _truncate_result(str(item["raw"]), max_result_len)
+                        yield {"type": "tool_end", "id": item["id"], "name": item["name"],
+                               "result": result, "status": "error" if item["error"] else "success",
+                               "error_message": result if item["error"] else None, "duration_ms": None}
+                        extractor = by_tool.get(item["name"], default_extractor)
+                        if extractor is not None:
+                            ex = result if getattr(extractor, "caps_content", False) else str(item["raw"])
+                            data = extractor.extract(ex)
+                            if data is not None:
+                                yield {"type": "extraction", "tool_name": item["name"],
+                                       "extracted_type": extractor.extracted_type, "data": data}
             elif t == "RunErrorEvent":
                 yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
                 return
@@ -617,6 +713,9 @@ async def iter_chunk_frames(
     # tool_call_id -> tool name, retained past ToolCallEndEvent (which pops tool_buf) so
     # the later ToolCallResultEvent can dispatch the right extractor by name (gh #92).
     tool_names: dict[str, str] = {}
+    # Tool results already streamed (ToolCallResultEvent), so the final snapshot
+    # re-emits only what a non-streaming turn never streamed (gh #91).
+    streamed_result_ids: set[str] = set()
     # The langgraph node currently executing (from StepStartedEvent) so a multi-node
     # graph's chunks carry the real node instead of a fixed "agent" — renderers use
     # it to separate one node's output from the next (gh #43).
@@ -659,13 +758,12 @@ async def iter_chunk_frames(
             elif t == "ToolCallResultEvent":
                 # Cap the result the way the event wire has always capped its `tool_end`
                 # frame (gh #102) — the CLI/Jupyter render loops read this chunk straight
-                # to the terminal. The extractor below still sees the FULL content: it
-                # parses a payload, and truncation is a display concern (iter_event_frames
-                # feeds its extractor the raw content for the same reason).
-                yield {
-                    "status": "streaming",
-                    "tool_result": _truncate_result(getattr(ev, "content", ""), max_result_len),
-                }
+                # to the terminal. A structured extractor below still sees the FULL
+                # content (it parses a payload; truncation is a display concern); a
+                # display-passthrough one is fed the capped result (gh #106).
+                streamed_result_ids.add(ev.tool_call_id)
+                result = _truncate_result(getattr(ev, "content", ""), max_result_len)
+                yield {"status": "streaming", "tool_result": result}
                 # Run the matching extractor over the tool result and, on a non-None
                 # return, emit an `extraction` chunk — parity with iter_event_frames'
                 # `extraction` frame so the CLI/Jupyter surfaces can render the same
@@ -673,7 +771,8 @@ async def iter_chunk_frames(
                 name = tool_names.get(ev.tool_call_id, "tool")
                 extractor = by_tool.get(name, default_extractor)
                 if extractor is not None:
-                    data = extractor.extract(getattr(ev, "content", ""))
+                    ex_content = result if getattr(extractor, "caps_content", False) else getattr(ev, "content", "")
+                    data = extractor.extract(ex_content)
                     if data is not None:
                         yield {
                             "status": "streaming",
@@ -703,35 +802,37 @@ async def iter_chunk_frames(
                     },
                 }
             elif t == "MessagesSnapshotEvent":
-                # The final snapshot carries every assistant message the turn produced,
-                # including any a later node returned finished (non-streamed). Emit the
-                # ones NOT already streamed token-by-token — keyed by message id — so a
-                # mixed turn (an earlier node streams, a later node appends a finished
-                # AIMessage) renders the finished message too, instead of dropping it once
-                # anything streamed (gh #89). A fully-streamed turn skips them all; a
-                # fully-snapshot turn emits them all (gh #67).
-                #
-                # The snapshot is the FULL thread, so slice to what follows the last user
-                # message — otherwise the agent re-emits its whole history every turn (gh
-                # #67). Then map the trailing assistant messages back to their steps (gh
-                # #43); the index alignment uses the full assistant list so skipping
-                # streamed ones doesn't shift the node mapping.
-                msgs = list(ev.messages)
-                last_user = max(
-                    (i for i, m in enumerate(msgs) if getattr(m, "role", None) in ("user", "human")),
-                    default=-1,
-                )
-                assistant = [
-                    m for m in msgs[last_user + 1:]
-                    if getattr(m, "role", None) == "assistant" and getattr(m, "content", None)
-                ]
-                offset = max(0, len(assistant) - len(step_nodes))
-                for i, m in enumerate(assistant):
-                    if getattr(m, "id", None) in streamed_ids:
-                        continue  # already emitted token-by-token; don't duplicate
-                    idx = i - offset
-                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                    yield {"status": "streaming", "chunk": m.content, "node": node}
+                # Emit the not-yet-streamed content, tool calls, AND tool results from
+                # the final snapshot via the shared _snapshot_items walk. Before gh #91
+                # this branch yielded only text and dropped empty-content messages, so a
+                # non-streaming tool agent showed no tool call/result and a tool-call-only
+                # AIMessage rendered empty. Still emits a later node's finished message
+                # (gh #89) and double-renders nothing on a fully-streamed turn.
+                for item in _snapshot_items(
+                    ev.messages,
+                    streamed_ids=streamed_ids,
+                    tool_names=tool_names,
+                    streamed_result_ids=streamed_result_ids,
+                    step_nodes=step_nodes,
+                    current_node=current_node,
+                ):
+                    if item["kind"] == "content":
+                        yield {"status": "streaming", "chunk": item["text"], "node": item["node"]}
+                    elif item["kind"] == "tool_call":
+                        yield {"status": "streaming",
+                               "tool_calls": [{"name": item["name"], "args": item["args"]}]}
+                    elif item["kind"] == "tool_result":
+                        result = _truncate_result(item["raw"], max_result_len)
+                        yield {"status": "streaming", "tool_result": result}
+                        extractor = by_tool.get(item["name"], default_extractor)
+                        if extractor is not None:
+                            ex = result if getattr(extractor, "caps_content", False) else item["raw"]
+                            data = extractor.extract(ex)
+                            if data is not None:
+                                yield {"status": "streaming",
+                                       "extraction": {"tool_name": item["name"],
+                                                      "extracted_type": extractor.extracted_type,
+                                                      "data": data}}
             elif t == "RunErrorEvent":
                 yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
 

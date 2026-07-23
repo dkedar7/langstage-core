@@ -568,20 +568,29 @@ async def test_iter_chunk_frames_leaves_short_result_untouched():
     assert "(truncated)" not in results[0]
 
 
-async def test_iter_chunk_frames_extractor_still_sees_the_full_result():
-    # Truncation is a *display* concern: the extractor parses the payload, so it must keep
-    # receiving the untruncated content (iter_event_frames feeds its extractor the raw
-    # content for the same reason). Capping the extractor's input would corrupt parsed data.
-    from langstage_core import GenericToolExtractor
+async def test_iter_chunk_frames_structured_extractor_still_sees_the_full_result():
+    # A *structured* extractor parses the payload, so it must keep receiving the
+    # untruncated content — capping its input would corrupt the parse. (Truncation is
+    # a display concern; iter_event_frames feeds its structured extractors raw content
+    # for the same reason.) A display-passthrough extractor is the OTHER case — see
+    # test_generic_extractor_extraction_frame_is_capped, where gh #106 caps its output.
+    class LenExtractor:
+        tool_name = "*"
+        extracted_type = "len"
+
+        def extract(self, content):
+            return {"len": len(content)}
 
     frames = await _collect(
         iter_chunk_frames(
-            build_agent(_big_result_graph()), "go", "c102e", extractors=[GenericToolExtractor()]
+            build_agent(_big_result_graph()), "go", "c102e",
+            max_result_len=500, extractors=[LenExtractor()],
         )
     )
     extraction = [f["extraction"] for f in frames if "extraction" in f]
     assert extraction, f"no extraction chunk emitted: {frames}"
-    assert extraction[0]["data"] == {"content": "X" * 2000}
+    # saw the full 2000 chars, not the 500-capped tool_result on the same wire
+    assert extraction[0]["data"] == {"len": 2000}
 
 
 async def test_truncate_result_passes_non_str_through_untouched():
@@ -593,3 +602,153 @@ async def test_truncate_result_passes_non_str_through_untouched():
     assert _truncate_result({"a": 1}, 1) == {"a": 1}
     assert _truncate_result([1, 2, 3], 1) == [1, 2, 3]
     assert _truncate_result(None, 1) is None
+
+
+# ── gh #91: the snapshot (non-token) path must surface tool calls + results ──────
+def _snapshot_tool_graph(result: str = "Sunny, 24C"):
+    """The issue's exact 'Creating Your Own Agent' shape: custom nodes that RETURN
+    finished messages and append the ToolMessage **manually** (no ToolNode), so the
+    AG-UI adapter emits no ToolCall events — every message arrives only via the final
+    MessagesSnapshotEvent. Before gh #91 that path yielded text only, so the tool
+    call + result never rendered. (A ToolNode-executed tool DOES emit streaming
+    ToolCall events and hides this bug — which is exactly why it went unnoticed.)"""
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langgraph.graph import START, END, MessagesState, StateGraph
+
+    def call_tool(state):
+        return {"messages": [AIMessage(content="Let me check the weather.", tool_calls=[
+            {"name": "get_weather", "args": {"city": "Paris"}, "id": "call_1"}])]}
+
+    def run_tool(state):
+        return {"messages": [ToolMessage(content=result, tool_call_id="call_1")]}
+
+    def final(state):
+        return {"messages": [AIMessage(content="The weather in Paris is sunny, 24C.")]}
+
+    g = StateGraph(MessagesState)
+    for n, f in [("call_tool", call_tool), ("run_tool", run_tool), ("final", final)]:
+        g.add_node(n, f)
+    g.add_edge(START, "call_tool"); g.add_edge("call_tool", "run_tool")
+    g.add_edge("run_tool", "final"); g.add_edge("final", END)
+    return g.compile()
+
+
+def _toolonly_graph():
+    """A tool-call-only assistant message (empty content) with no following tool
+    message — the issue's `toolonly_agent.py`, which rendered ZERO output (only a
+    `complete` frame) while --verify reported success."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import START, END, MessagesState, StateGraph
+
+    def call(state):
+        return {"messages": [AIMessage(content="", tool_calls=[
+            {"name": "get_weather", "args": {"city": "Paris"}, "id": "only_1"}])]}
+
+    g = StateGraph(MessagesState)
+    g.add_node("call", call)
+    g.add_edge(START, "call"); g.add_edge("call", END)
+    return g.compile()
+
+
+async def test_snapshot_chunk_wire_emits_tool_call_and_result():
+    frames = await _collect(iter_chunk_frames(build_agent(_snapshot_tool_graph()), "weather?", "s91c"))
+    calls = [f for f in frames if "tool_calls" in f]
+    results = [f for f in frames if "tool_result" in f]
+    chunks = [f["chunk"] for f in frames if "chunk" in f]
+    assert calls and calls[0]["tool_calls"][0]["name"] == "get_weather", "tool call dropped on snapshot wire (gh #91)"
+    assert results and results[0]["tool_result"] == "Sunny, 24C", "tool result dropped on snapshot wire (gh #91)"
+    assert "Let me check the weather." in chunks and "The weather in Paris is sunny, 24C." in chunks
+
+
+async def test_snapshot_event_wire_emits_tool_start_and_end():
+    frames = await _collect(iter_event_frames(build_agent(_snapshot_tool_graph()), "weather?", "s91e"))
+    starts = [f for f in frames if f.get("type") == "tool_start"]
+    ends = [f for f in frames if f.get("type") == "tool_end"]
+    contents = [f["content"] for f in frames if f.get("type") == "content"]
+    assert starts and starts[0]["name"] == "get_weather", "tool_start dropped on snapshot event wire (gh #91)"
+    assert ends and ends[0]["result"] == "Sunny, 24C", "tool_end dropped on snapshot event wire (gh #91)"
+    assert "The weather in Paris is sunny, 24C." in contents
+
+
+async def test_toolonly_message_is_not_dropped_whole():
+    # The worst case: a tool-call-only empty-content turn used to emit only `complete`.
+    frames = await _collect(iter_chunk_frames(build_agent(_toolonly_graph()), "go", "s91only"))
+    calls = [f for f in frames if "tool_calls" in f]
+    assert calls and calls[0]["tool_calls"][0]["name"] == "get_weather", "tool-call-only turn rendered nothing (gh #91)"
+
+
+async def test_snapshot_tool_result_is_capped():
+    # gh #91 + #102: the snapshot tool_result honors max_result_len too.
+    frames = await _collect(iter_chunk_frames(build_agent(_snapshot_tool_graph("X" * 5000)), "go", "s91cap", max_result_len=500))
+    results = [f["tool_result"] for f in frames if "tool_result" in f]
+    assert results and len(results[0]) == 512 and results[0].endswith("…(truncated)")
+
+
+# ── gh #106: the extraction frame must not carry the full uncapped blob ──────────
+async def test_generic_extractor_extraction_frame_is_capped():
+    """GenericToolExtractor echoes content verbatim as a display card, so its
+    extraction frame's data['content'] must be capped like tool_end — otherwise the
+    wire carries a 512-char capped copy AND the full 5000-char copy side by side.
+    Uses the STREAMING (ToolNode) big-result graph, the path #106 was filed against."""
+    from langstage_core import GenericToolExtractor
+
+    frames = await _collect(iter_event_frames(build_agent(_big_result_graph(5000)), "go", "s106e", max_result_len=500, extractors=[GenericToolExtractor()]))
+    tool_end = [f for f in frames if f.get("type") == "tool_end"]
+    extraction = [f for f in frames if f.get("type") == "extraction"]
+    assert tool_end and len(tool_end[0]["result"]) == 512
+    assert extraction, "GenericToolExtractor produced no extraction frame"
+    capped = extraction[0]["data"]["content"]
+    assert len(capped) == 512 and capped.endswith("…(truncated)"), "extraction frame carried the FULL uncapped blob (gh #106)"
+    # both copies on the wire must be the SAME capped string, never the 5000-char raw
+    assert capped == tool_end[0]["result"]
+
+
+async def test_structured_extractor_still_sees_full_content():
+    """The #106 cap must NOT reach a structured extractor that parses raw content —
+    capping its input would corrupt the parse (the reason #102 fed it raw)."""
+    seen = {}
+
+    class LenExtractor:
+        tool_name = "*"
+        extracted_type = "len"
+        def extract(self, content):
+            seen["len"] = len(content)
+            return {"len": len(content)}
+
+    await _collect(iter_event_frames(build_agent(_big_result_graph(5000)), "go", "s106s", max_result_len=500, extractors=[LenExtractor()]))
+    assert seen["len"] == 5000, "structured extractor saw truncated content (regression of #102's decision)"
+
+
+async def test_streaming_turn_does_not_double_emit_tool_frames():
+    """The snapshot dedup guard: a fully-streamed tool turn must emit each tool call
+    and result exactly once, not once from streaming and again from the snapshot."""
+    from typing import Iterator, List
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+    from langchain_core.tools import tool
+    from langgraph.prebuilt import create_react_agent
+
+    @tool
+    def note(text: str) -> str:
+        """Write a note."""
+        return "saved"
+
+    class M(BaseChatModel):
+        @property
+        def _llm_type(self): return "m"
+        def bind_tools(self, tools, **k): return self
+        def _stream(self, messages: List[BaseMessage], stop=None, run_manager=None, **k) -> Iterator[ChatGenerationChunk]:
+            if any(isinstance(m, ToolMessage) for m in messages):
+                yield ChatGenerationChunk(message=AIMessageChunk(content="ok"))
+            else:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[{"name": "note", "args": '{"text":"hi"}', "id": "c1", "index": 0}]))
+        def _generate(self, messages, stop=None, run_manager=None, **k) -> ChatResult:
+            cs = list(self._stream(messages)); msg = cs[0].message
+            for c in cs[1:]: msg = msg + c.message
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=msg.content, tool_calls=getattr(msg, "tool_calls", [])))])
+
+    agent = build_agent(create_react_agent(M(), [note]))
+    frames = await _collect(iter_chunk_frames(agent, "note hi", "s91dedup"))
+    assert len([f for f in frames if "tool_calls" in f]) == 1, "tool call double-emitted (streaming + snapshot)"
+    assert len([f for f in frames if "tool_result" in f]) == 1, "tool result double-emitted (streaming + snapshot)"

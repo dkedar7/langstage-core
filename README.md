@@ -102,7 +102,10 @@ Any LangGraph agent can be served over the **[AG-UI protocol](https://github.com
 ```bash
 langstage-agui --agent my_agent.py:graph     # serve over AG-UI at http://localhost:8050
 langstage-agui --demo                          # keyless echo agent, no API key
+langstage-agui --agent my_agent.py:graph --verify   # run one keyless turn; exit 0 ok / 1 failed
 ```
+
+`--verify` is the preflight to run right after wiring up an agent: `--show-config` proves the config chain *resolves* a spec, but `--verify` proves it **loads and actually produces a turn** — catching the two most common failures (a typo'd `module:attr`, or a graph that loads but yields an empty/erroring turn) that otherwise only surface at first chat. Keyless, so it fits a CI/deploy gate.
 
 ```python
 from langstage_core.agui import build_app
