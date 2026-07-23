@@ -94,6 +94,23 @@ asyncio.run(main())
 
 Serve the same demo over AG-UI with `langstage-agui --demo=tools`.
 
+#### One call, one answer (no streaming)
+
+The `iter_*` mappings are streaming generators — perfect for a live UI, but a test, an eval/grading harness, a batch job, or a "run my agent once, give me the answer" script wants a **single call that returns the result**. `run_turn` (sync) / `collect_event_frames` (async) do exactly that, returning a typed `TurnResult` (`text`, `tool_calls`, `extractions`, `reasoning`, `outcome`, `interrupt`, `error`, `frames`) — nothing streamed, nothing hand-accumulated:
+
+```python
+from langstage_core.agui import run_turn
+from langstage_core.demo.tools import create_tool_demo_agent, demo_extractors
+
+result = run_turn(create_tool_demo_agent(), "use a tool", extractors=demo_extractors())
+result.text          # 'The demo tool returned {"query": "use a tool", "answer": "42", ...}'
+result.tool_calls    # [{'name': 'demo_lookup', 'args': {'query': 'use a tool'}, 'id': 'demo_lookup_1'}]
+result.extractions   # [{'tool_name': 'demo_lookup', 'extracted_type': 'demo_fact', 'data': {...}}]
+result.outcome       # 'complete'   ('interrupted' on "ask me", 'error' on a failing turn)
+```
+
+`run_turn` accepts a compiled graph **or** a prebuilt `build_agent(...)` and runs the turn under `asyncio.run`; inside an event loop, `await collect_event_frames(agent, message, thread_id, ...)` instead (or `collect_chunk_frames` for the chunk wire). The `complete` / `interrupted` / `error` verdict is the same rule `SessionAdapter` uses, so a one-shot turn and a streamed one agree. (The sibling `langstage` package's `oneturn.py` is a *different* layer — it buffers a `SessionAdapter` for the web one-turn HTTP endpoint; these core helpers are session-free, for tests/evals/scripts.)
+
 ### Human-in-the-loop (interrupt → resume)
 
 When the graph calls `interrupt(...)`, you get an `interrupt` frame; resume by passing the decision back via `resume=`:
@@ -119,7 +136,7 @@ Everything is re-exported from the top-level `langstage_core` package (except th
 | Area | API | What it does |
 |---|---|---|
 | **Host** | `load_agent_spec`, `HostConfig`, `Workspace` | Load a graph from a `module:attr` / `file.py:attr` spec; resolve layered config (defaults < `langstage.toml` < `LANGSTAGE_*` env < overrides). |
-| **AG-UI bridge** (`langstage_core.agui`) | `build_agent`, `iter_event_frames`, `iter_chunk_frames`, `build_app`, `serve`, `add_agui_endpoint` | Stream any `CompiledGraph` in-process (the `iter_*` mappings) or serve it as an AG-UI HTTP endpoint. |
+| **AG-UI bridge** (`langstage_core.agui`) | `build_agent`, `iter_event_frames`, `iter_chunk_frames`, `collect_event_frames` / `collect_chunk_frames` / `run_turn` (→ `TurnResult`), `build_app`, `serve`, `add_agui_endpoint` | Stream any `CompiledGraph` in-process (the `iter_*` mappings), collect one turn into a typed `TurnResult` (the `collect_*` / `run_turn` one-shots), or serve it as an AG-UI HTTP endpoint. |
 | **Session adapter** (top-level; also `langstage_core.adapters`) | `SessionAdapter`, `Session` | A session-scoped driver over the AG-UI agent with a typed terminal `outcome` — the streaming engine behind the web app + task board. |
 | **Input helpers** | `prepare_agent_input`, `create_resume_input` | Build graph input from a message (+ optional context) or a resume decision. |
 | **Extractors** | `ToolExtractor` + built-ins (`ThinkToolExtractor`, `TodoExtractor`, `DisplayInlineExtractor`, `SkillManageExtractor`, `MemoryExtractor`, …) | Turn a tool's result into a structured `extraction` frame; pass `extractors=[...]` to the `iter_*` mappings. |

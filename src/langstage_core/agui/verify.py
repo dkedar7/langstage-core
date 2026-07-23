@@ -22,7 +22,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from . import _is_langgraph_agent, build_agent, iter_event_frames
+from . import _is_langgraph_agent, _terminal_outcome, build_agent, iter_event_frames
 
 # A tiny, model-agnostic probe. It only needs the turn to *complete*; the content
 # is incidental (the keyless demo stub echoes it, a real model answers it).
@@ -82,13 +82,17 @@ async def averify(
     )
 
     result = VerifyResult(ok=False, reason="turn produced no completion frame")
+    saw_interrupt = False
 
     async def _run() -> None:
+        nonlocal saw_interrupt
         async for frame in iter_event_frames(agent, message, thread_id, state=state):
             result.frames += 1
             kind = frame.get("type")
             if kind == "content":
                 result.content_chars += len(frame.get("content") or "")
+            elif kind == "interrupt":
+                saw_interrupt = True
             elif kind == "error":
                 result.saw_error = True
                 result.error_message = frame.get("error")
@@ -104,11 +108,21 @@ async def averify(
         result.reason = f"{type(exc).__name__}: {exc}"
         return result
 
-    result.ok = result.saw_complete and not result.saw_error
+    # A clean preflight is a turn that reached a `complete` frame with the
+    # `complete` outcome — no error, and no pending interrupt (a probe never
+    # resumes, so pausing for a decision isn't a clean pass). The outcome comes
+    # from the one shared _terminal_outcome rule the collectors + _produce use
+    # (gh #110), so verify can't drift from them. On the non-interrupt turns a
+    # probe actually produces, `outcome == "complete"` iff `not saw_error`, so
+    # this is identical to the prior `saw_complete and not saw_error`.
+    outcome = _terminal_outcome(saw_interrupt=saw_interrupt, saw_error=result.saw_error)
+    result.ok = result.saw_complete and outcome == "complete"
     if result.ok:
         result.reason = "one turn completed cleanly"
     elif result.saw_error:
         result.reason = f"agent errored: {result.error_message}"
+    elif saw_interrupt:
+        result.reason = "turn paused on an interrupt (did not complete cleanly)"
     return result
 
 

@@ -37,6 +37,10 @@ __all__ = [
     "ensure_available",
     "iter_event_frames",
     "iter_chunk_frames",
+    "collect_event_frames",
+    "collect_chunk_frames",
+    "run_turn",
+    "TurnResult",
     "verify",
     "averify",
     "VerifyResult",
@@ -409,6 +413,37 @@ def _unwrap_resume(resume):
     except ImportError:  # pragma: no cover - langgraph is always present in practice
         return resume
     return resume.resume if isinstance(resume, Command) else resume
+
+
+def _terminal_outcome(*, saw_interrupt: bool, saw_error: bool) -> str:
+    """The single source of truth for a turn's typed terminal outcome (gh #110).
+
+    Given whether the turn saw an ``error`` frame and/or a pending ``interrupt``
+    frame by the time it terminated, return the outcome string the whole family
+    agrees on:
+
+    - ``"error"`` if an ``error`` frame fired — it wins even over a pending
+      interrupt, because a turn that errors after pausing did **not** pause
+      cleanly;
+    - else ``"interrupted"`` if a ``complete`` frame arrived while an
+      ``interrupt`` was pending (a HITL turn waiting on a decision);
+    - else ``"complete"``.
+
+    This is exactly the rule ``SessionAdapter._produce`` used to inline over the
+    ``iter_event_frames`` stream (``adapters/session.py``) and that
+    ``collect_event_frames`` / ``collect_chunk_frames`` — and every hand-rolled
+    accumulator the issue counted (four in one session) — would otherwise
+    re-implement and drift on. ``_produce`` and both collectors now call this, so
+    the ``complete`` / ``interrupted`` / ``error`` state machine lives in one
+    tested place. (``verify()``'s simpler pass/fail ``ok`` derives from it too;
+    ``"cancelled"`` is orthogonal — a transport concern ``_produce`` sets on
+    ``asyncio.CancelledError``, not part of this frame-driven rule.)
+    """
+    if saw_error:
+        return "error"
+    if saw_interrupt:
+        return "interrupted"
+    return "complete"
 
 
 async def iter_event_frames(
@@ -846,6 +881,13 @@ async def iter_chunk_frames(
     yield {"status": "complete"}
 
 
-# Imported at the bottom so verify.py can reference build_agent / iter_event_frames
-# as already-defined names (avoids a circular import). See ADR 0004.
+# Imported at the bottom so verify.py / collect.py can reference build_agent /
+# iter_event_frames / _terminal_outcome as already-defined names (avoids a circular
+# import). See ADR 0004.
+from .collect import (  # noqa: E402,F401
+    TurnResult,
+    collect_chunk_frames,
+    collect_event_frames,
+    run_turn,
+)
 from .verify import VerifyResult, averify, verify  # noqa: E402,F401

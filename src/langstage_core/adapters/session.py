@@ -229,7 +229,7 @@ class SessionAdapter:
         outcome (``session.outcome`` + ``session.interrupt`` / ``session.error``) so
         headless consumers (the task runner) don't re-inspect the event stream.
         """
-        from ..agui import build_agent, iter_event_frames
+        from ..agui import _terminal_outcome, build_agent, iter_event_frames
 
         session.outcome = None
         session.interrupt = None
@@ -254,18 +254,23 @@ class SessionAdapter:
             ):
                 session.push(data)
                 kind = data.get("type")
+                # The complete/interrupted/error decision is the shared
+                # _terminal_outcome rule (gh #110) — the same one collect_event_frames
+                # / collect_chunk_frames use — so this session-scoped path and the
+                # one-shot collectors can't drift. (`cancelled`, below, is orthogonal:
+                # a transport concern, not part of the frame-driven rule.)
                 if kind == "interrupt":
                     pending_interrupt = data
                 elif kind == "error":
-                    session.outcome = "error"
+                    session.outcome = _terminal_outcome(saw_interrupt=False, saw_error=True)
                     session.error = data.get("error")
                     return
                 elif kind == "complete":
-                    if pending_interrupt is not None:
-                        session.outcome = "interrupted"
+                    session.outcome = _terminal_outcome(
+                        saw_interrupt=pending_interrupt is not None, saw_error=False
+                    )
+                    if session.outcome == "interrupted":
                         session.interrupt = pending_interrupt
-                    else:
-                        session.outcome = "complete"
                     return
         except asyncio.CancelledError:
             session.outcome = "cancelled"
