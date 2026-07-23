@@ -50,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the resolved host config and exit.",
     )
     parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Run one keyless turn against the agent and report whether it works, "
+        "then exit (0 ok / 1 failed). The preflight to run right after --agent.",
+    )
+    parser.add_argument(
         "--version",
         action="store_true",
         help="Print the langstage-core version and exit.",
@@ -134,6 +140,22 @@ def main(argv: list[str] | None = None) -> int:
     except (ImportError, AttributeError, OSError, ValueError) as exc:
         print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
         return 2
+
+    # --verify: the question every adopter asks right after --agent — "did it load
+    # AND actually produce a turn?" — which --show-config can't answer (a spec that
+    # resolves can still fail to run). Drive the already-shipped keyless verify()
+    # over the loaded graph and report, instead of making the user hand-craft an
+    # AG-UI POST or write async Python around iter_*. (gh #105)
+    if args.verify:
+        from . import verify
+
+        result = verify(graph)
+        if result.ok:
+            print(f"ok: {result.reason} ({result.frames} frames, {result.content_chars} chars)")
+            return 0
+        detail = result.error_message or result.reason
+        print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
+        return 1
 
     name = args.name or ("Demo Agent" if args.demo else DEFAULT_AGENT_NAME)
     # cfg.host/cfg.port are the resolved values --show-config prints, so the

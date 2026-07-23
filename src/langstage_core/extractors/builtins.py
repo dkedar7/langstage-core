@@ -383,6 +383,13 @@ class GenericToolExtractor:
 
     tool_name = "*"  # sentinel; treated as the fallback, not a literal dispatch key
     extracted_type = "tool_call"
+    # This extractor echoes the tool result verbatim as a display card, so its
+    # output is subject to the same `max_result_len` cap as the tool_end/tool_result
+    # frame — otherwise the wire carries a capped copy AND the full blob side by side
+    # (gh #106). Structured extractors that PARSE content leave this False so they
+    # still see the raw content and parse correctly. The iter_* mappings feed a
+    # caps_content extractor the already-truncated result.
+    caps_content = True
 
     def extract(self, content: Any) -> dict[str, Any] | None:
         if content is None:

@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.0.24] - 2026-07-23
+
+### Fixed
+- **The snapshot (non-token) path now surfaces tool calls and tool results, not just text
+  (gh #91, filed via langstage-cli).** A graph whose messages are produced *without token
+  streaming* — a custom node calling `model.invoke()`, a non-streaming provider, a rule-based
+  node that returns a finished `AIMessage`/`ToolMessage` (the "Creating Your Own Agent" shape) —
+  delivers everything through the final `MessagesSnapshotEvent`, and that branch of **both**
+  `iter_*` mappings yielded text only: it filtered to `role=="assistant" and content`, so a
+  `ToolMessage` result was dropped, a tool call carried on a snapshot `AIMessage` was never
+  surfaced, and a tool-call-only `AIMessage(content="", tool_calls=[...])` was dropped whole —
+  rendering a completely empty turn while `verify()`/the exit code reported success. The headline
+  "tool-call rendering" feature was invisible on this entire class of agent. (A tool executed via
+  a real `ToolNode` emits streaming `ToolCall*` events and rendered fine, which is exactly why the
+  gap went unnoticed.) The snapshot branch now emits `tool_calls`/`tool_result` (chunk wire) and
+  `tool_start`/`tool_end` (event wire) for the not-yet-streamed messages, via a shared
+  `_snapshot_items` walk so the two wires can't drift. Dedup keeps a fully-streamed turn from
+  double-rendering: content by message id, tool calls by `tool_call_id` (populated only on the
+  streaming `ToolCallStart`), tool results by a new `streamed_result_ids` set. The snapshot
+  `tool_result` honors `max_result_len` and runs extractors, at parity with the streaming path.
+- **The `extraction` frame no longer defeats `max_result_len` for the generic tool-callout card
+  (gh #106).** `GenericToolExtractor` echoes the tool result verbatim as a display card
+  (`{"content": <raw>}`), and the `iter_*` mappings ran every extractor on the *raw* content — so
+  with `GenericToolExtractor` in `extractors=[...]` the wire carried a 512-char capped `tool_end`
+  **and** the full 5000-char blob in the adjacent `extraction` frame, reintroducing exactly the
+  unbounded-terminal-output harm `#102`'s cap exists to prevent. A `caps_content` marker now
+  distinguishes a display-passthrough extractor (fed the already-truncated result) from a
+  *structured* extractor that parses content (still fed the raw content, because capping its input
+  would corrupt the parse — the deliberate #102 decision). `GenericToolExtractor` sets it; custom
+  structured extractors do not.
+
+### Added
+- **`langstage-agui --verify` runs one keyless turn against the agent and reports whether it
+  actually works (gh #105).** The already-shipped, exported `verify()` preflight was reachable only
+  from Python and wired to no CLI flag, so the question every adopter asks right after `--agent` —
+  "did it load *and* produce a turn?" — had no one-command answer (`--show-config` proves the spec
+  *resolves*, not that it *runs*; a typo'd `module:attr` or a graph that yields an empty/erroring
+  turn both pass `--show-config` and only surface at first chat). `--verify` loads the spec with the
+  same clean error handling as the serve path, drives `verify()`, prints the result, and exits
+  `0` ok / `1` failed — keyless, so it fits a CI/deploy gate. Documented in the README.
+
 ## [1.0.23] - 2026-07-23
 
 ### Fixed
