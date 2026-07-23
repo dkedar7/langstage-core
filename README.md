@@ -64,6 +64,36 @@ asyncio.run(main())
 
 `build_agent` attaches an in-memory checkpointer if the graph has none, so multi-turn memory and interrupts work out of the box; pass a `thread_id` per turn to key per-conversation state.
 
+#### See every frame type, keyless
+
+The echo stub above only emits `content`. To see the *rich* frames without an API key, point `build_agent` at the bundled tool demo (`langstage_core.demo.tools:graph`): it calls a built-in tool through a real `ToolNode`, streams a reasoning delta, and raises a resumable `interrupt`, all deterministically and offline. Each trigger phrase drives a different frame type:
+
+```python
+import asyncio
+from langstage_core import create_resume_input
+from langstage_core.agui import build_agent, iter_event_frames
+from langstage_core.demo.tools import create_tool_demo_agent, demo_extractors
+
+agent = build_agent(create_tool_demo_agent())
+
+async def main():
+    for turn in ("hello", "think about it", "use a tool"):
+        async for frame in iter_event_frames(agent, turn, "s1", extractors=demo_extractors()):
+            print(frame["type"], "→", {k: v for k, v in frame.items() if k != "type"})
+
+    # "ask me" raises interrupt(...); resume the same thread with a decision.
+    async for frame in iter_event_frames(agent, "ask me", "s2"):
+        print(frame["type"])                       # ... interrupt
+    async for frame in iter_event_frames(agent, "", "s2",
+                                         resume=create_resume_input(decisions=[{"type": "approve"}])):
+        print(frame["type"])                       # content, complete
+
+asyncio.run(main())
+# content · reasoning · tool_start · tool_end · extraction · interrupt · complete
+```
+
+Serve the same demo over AG-UI with `langstage-agui --demo=tools`.
+
 ### Human-in-the-loop (interrupt → resume)
 
 When the graph calls `interrupt(...)`, you get an `interrupt` frame; resume by passing the decision back via `resume=`:
@@ -102,6 +132,7 @@ Any LangGraph agent can be served over the **[AG-UI protocol](https://github.com
 ```bash
 langstage-agui --agent my_agent.py:graph     # serve over AG-UI at http://localhost:8050
 langstage-agui --demo                          # keyless echo agent, no API key
+langstage-agui --demo=tools                    # keyless rich-frame demo (tools, reasoning, interrupt)
 langstage-agui --agent my_agent.py:graph --verify   # run one keyless turn; exit 0 ok / 1 failed
 ```
 
