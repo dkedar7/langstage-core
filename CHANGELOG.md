@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.23] - 2026-07-23
+
+### Fixed
+- **A malformed numeric env var no longer crashes every entrypoint that resolves config
+  (gh #104).** `HostConfig.resolve()` cast environment values with no error handling, so a
+  single bad char in `LANGSTAGE_PORT` — `abc`, an unexpanded `"$PORT"`, a copy-paste
+  `"localhost:8050"`, a stray `"8050 x"` — raised an uncaught `ValueError` straight out of
+  `resolve()` and took down `langstage-agui --show-config`, `--demo`, `--agent ...`, and
+  `python -m langstage_core.host`. The **TOML** layer already degraded this exact mistake to a
+  one-line `note:` and kept resolving; the **env** layer did not — the two paths were asymmetric
+  for the same input, and the module's own docstrings *advertised* that "the numeric env casters
+  already emit" the graceful note when in fact they crashed. Now they do: a malformed numeric env
+  var is caught, a `note: ignoring malformed <VAR>=<value> (…); using … instead.` goes to stderr
+  (ASCII-only, deduped per (var, value)), and resolution continues.
+
+  Crucially the rejected env var falls through to **the layer beneath it, not straight to the
+  built-in default**: if a valid `langstage.toml` sets the same key, that value is kept and
+  `--show-config` still credits `toml (…)` — a malformed env var can no longer silently clobber a
+  user's explicit config with a hardcoded default. This is the root-cause fix for the crash side
+  of langstage-hermes #83 and both halves of langstage-jupyter #83 (the value-discard and the
+  `--show-config` source-mislabel); those hosts inherit it by resolving through this method and
+  can drop their own local env-leniency shims.
+
 ## [1.0.22] - 2026-07-19
 
 ### Fixed
