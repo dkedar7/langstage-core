@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.0.25] - 2026-07-23
+
+### Added
+- **A keyless, network-free demo agent that exercises *every* rich frame type, not just
+  text echo (gh #99).** The shared demo stub (`langstage_core.demo.stub:graph`) behind every
+  surface's `--demo` and the README Quick Start only ever emitted `content` frames — a plain
+  echo. But `content` is one of *eight* documented frame types, and the rich ones
+  (`tool_start` / `tool_end` / `extraction` / `reasoning` / `interrupt`) are the library's
+  whole selling point, reachable before now only by hand-building a LangGraph graph *and*
+  correctly wiring a real `ToolNode`. That was the single biggest dogfooding friction, and it
+  left the largest bug class in this repo's history — rich-frame emission defects (#41/#43/#45,
+  #50, #71, #89, #90, #91) — with no keyless regression fixture. `langstage_core.demo.tools:graph`
+  (built by `create_tool_demo_agent()`) closes the gap: a real compiled graph — a router node
+  plus a real `langgraph.prebuilt.ToolNode` — that routes on a trigger in the user's message:
+  a normal message streams a token-by-token `content` reply (as the echo stub does); `"use a
+  tool"` calls a built-in keyless `demo_lookup` tool through the `ToolNode`, producing
+  `tool_start` → `tool_end` plus an `extraction` frame via the paired built-in
+  `DemoLookupExtractor` (pass `demo_extractors()` to the `iter_*` mappings' `extractors=`);
+  `"think"` streams a `reasoning` delta (kept separate from the answer); and `"ask me"` raises
+  a resumable `interrupt(...)`. Everything is deterministic and offline — the "model" is a local
+  fake, no API key, no network, no model call. The tool path deliberately goes through a **real
+  `ToolNode`**, because the AG-UI adapter emits streaming `ToolCall*` events only when a tool
+  runs through one — a hand-rolled `AIMessage(tool_calls=...)` + manually-appended `ToolMessage`
+  arrives via the snapshot path instead (the distinction 1.0.24 / #91 hinges on); the demo bakes
+  the correct wiring in so no adopter has to rediscover it. Doubles as a live keyless smoke test
+  and the regression fixture the issue asked for.
+- **`langstage-agui --demo=tools` serves the rich demo over AG-UI, keyless (gh #99).** `--demo`
+  now takes an optional value: bare `--demo` still serves the echo stub unchanged, and
+  `--demo=tools` serves `langstage_core.demo.tools:graph`. `--show-config`, `--verify`, and
+  mutual-exclusion with `--agent` all behave for both. The README's frame-type list now points
+  at a runnable keyless snippet that prints each of `content` / `reasoning` / `tool_start` /
+  `tool_end` / `extraction` / `interrupt` / `complete`.
+
 ## [1.0.24] - 2026-07-23
 
 ### Fixed

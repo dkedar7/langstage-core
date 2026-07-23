@@ -49,6 +49,35 @@ def test_show_config_default_host_port_present(capsys):
     assert "host" in out and "port" in out
 
 
+def test_demo_show_config_resolves_echo_spec(capsys):
+    # Bare --demo is unchanged: it serves the echo stub.
+    rc = main(["--demo", "--show-config"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "langstage_core.demo.stub:graph" in out
+
+
+def test_demo_tools_show_config_resolves_tools_spec(capsys):
+    # gh #99: --demo=tools serves the rich-frame demo instead of the echo stub.
+    rc = main(["--demo=tools", "--show-config"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "langstage_core.demo.tools:graph" in out
+
+
+def test_demo_tools_is_still_mutually_exclusive_with_agent(capsys):
+    rc = main(["--demo=tools", "--agent", "my_agent.py:graph"])
+    assert rc == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_demo_rejects_unknown_value(capsys):
+    # An unknown --demo value is an argparse error (SystemExit 2), not a silent fall-through.
+    with pytest.raises(SystemExit) as exc:
+        main(["--demo=bogus"])
+    assert exc.value.code == 2
+
+
 def test_show_config_omits_keys_the_server_ignores(capsys):
     # The AG-UI server consumes only agent_spec/host/port; workspace_root/debug/
     # title are inherited but inert on this surface, so --show-config must not

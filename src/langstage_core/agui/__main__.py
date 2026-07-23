@@ -2,6 +2,7 @@
 
     langstage-agui --agent my_agent.py:graph
     langstage-agui --demo                       # keyless echo agent, no API key
+    langstage-agui --demo=tools                 # keyless rich-frame demo (tools/reasoning/interrupt)
     langstage-agui --agent langstage_hermes.agent:graph --port 9000
 
 The agent spec resolves through the shared host config chain, so
@@ -12,7 +13,16 @@ from __future__ import annotations
 
 import sys
 
-DEMO_SPEC = "langstage_core.demo.stub:graph"
+# The keyless built-in demos, keyed by the value of --demo. Bare `--demo` selects
+# "echo" (the plain token echo stub, unchanged); `--demo=tools` selects the rich
+# demo that exercises every frame type — tool_start/tool_end/extraction/reasoning/
+# interrupt (gh #99). DEMO_SPEC stays the echo spec for backward compatibility.
+DEMO_SPECS = {
+    "echo": "langstage_core.demo.stub:graph",
+    "tools": "langstage_core.demo.tools:graph",
+}
+DEMO_SPEC = DEMO_SPECS["echo"]
+DEMO_NAMES = {"echo": "Demo Agent", "tools": "Tool Demo Agent"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,8 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--demo",
-        action="store_true",
-        help="Serve the built-in keyless demo agent (no API key needed).",
+        nargs="?",
+        const="echo",
+        choices=["echo", "tools"],
+        default=None,
+        help="Serve a built-in keyless demo agent (no API key needed). Bare --demo "
+        "serves the echo stub; --demo=tools serves the rich-frame demo that exercises "
+        "tool_start/tool_end/extraction/reasoning/interrupt.",
     )
     # host/port default to None so the resolved HostConfig (env / langstage.toml /
     # defaults) supplies them and --show-config matches the real bind; an explicit
@@ -99,11 +114,11 @@ def main(argv: list[str] | None = None) -> int:
         # stdio sidecar and JupyterLab launcher already use). (gh #39)
         described = cfg.describe(omit_keys=["workspace_root", "debug", "title"])
         if args.demo:
-            described += f"\n  demo: agent_spec resolves to {DEMO_SPEC}"
+            described += f"\n  demo: agent_spec resolves to {DEMO_SPECS[args.demo]}"
         print(described)
         return 0
 
-    spec: str | None = DEMO_SPEC if args.demo else cfg.agent_spec
+    spec: str | None = DEMO_SPECS[args.demo] if args.demo else cfg.agent_spec
 
     if not spec:
         print(
@@ -157,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
         return 1
 
-    name = args.name or ("Demo Agent" if args.demo else DEFAULT_AGENT_NAME)
+    name = args.name or (DEMO_NAMES[args.demo] if args.demo else DEFAULT_AGENT_NAME)
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
     print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
