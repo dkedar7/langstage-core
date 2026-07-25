@@ -100,14 +100,17 @@ async def collect_event_frames(
     """Run one turn through :func:`iter_event_frames` and return a :class:`TurnResult`.
 
     A drop-in "I don't need the stream, just the result" over the event wire:
-    same signature and kwargs as :func:`iter_event_frames` (``agent`` is an
-    already-built ``LangGraphAgent`` — see :func:`build_agent`), all forwarded
-    unchanged. Accumulates ``content`` / ``reasoning`` deltas, ``tool_start`` and
+    same signature and kwargs as :func:`iter_event_frames`, all forwarded
+    unchanged. ``agent`` may be a prebuilt ``LangGraphAgent``, a compiled graph, or
+    a ``module:attr`` / ``path/to/file.py:attr`` **spec string** (resolved through
+    :func:`build_agent`, like the CLI) (gh #112). Accumulates ``content`` / ``reasoning`` deltas, ``tool_start`` and
     ``extraction`` frames, captures any ``interrupt`` / ``error``, and derives the
     typed ``outcome`` from the shared
     :func:`~langstage_core.agui._terminal_outcome` rule — so it can't drift from
     ``SessionAdapter._produce``.
     """
+    agent = agent if _is_langgraph_agent(agent) else build_agent(agent)
+
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
@@ -185,6 +188,8 @@ async def collect_chunk_frames(
     ``action_requests`` / ``allowed_decisions`` keys match the event wire's, so
     ``result.interrupt["action_requests"]`` reads the same across both collectors.
     """
+    agent = agent if _is_langgraph_agent(agent) else build_agent(agent)
+
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[dict] = []

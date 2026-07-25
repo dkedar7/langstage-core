@@ -174,3 +174,43 @@ def test_collectors_exported_from_agui():
     for name in ("collect_event_frames", "collect_chunk_frames", "run_turn", "TurnResult"):
         assert name in agui.__all__, f"{name} missing from langstage_core.agui.__all__"
         assert hasattr(agui, name)
+
+
+# ── gh #112: the one-shot Python surface accepts a spec string, like the CLI ──────
+def test_build_agent_resolves_a_spec_string():
+    from langstage_core.agui import build_agent
+
+    agent = build_agent("langstage_core.demo.stub:graph")
+    assert hasattr(agent, "run") and hasattr(agent, "name")  # a built LangGraphAgent
+
+
+def test_run_turn_accepts_a_spec_string():
+    from langstage_core.agui import run_turn
+
+    result = run_turn("langstage_core.demo.stub:graph", "hi")
+    assert result.outcome == "complete"
+    assert "hi" in result.text
+
+
+def test_verify_accepts_a_spec_string():
+    from langstage_core.agui import verify
+
+    assert verify("langstage_core.demo.stub:graph").ok
+
+
+def test_collect_event_frames_accepts_a_spec_string():
+    import asyncio
+
+    from langstage_core.agui import collect_event_frames
+
+    result = asyncio.run(collect_event_frames("langstage_core.demo.stub:graph", "hi", "t112"))
+    assert result.outcome == "complete"
+
+
+def test_collect_chunk_frames_accepts_a_spec_string():
+    import asyncio
+
+    from langstage_core.agui import collect_chunk_frames
+
+    result = asyncio.run(collect_chunk_frames("langstage_core.demo.stub:graph", "hi", "t112c"))
+    assert result.outcome == "complete"

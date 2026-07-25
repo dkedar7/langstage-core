@@ -449,6 +449,54 @@ class HostConfig:
         """Per-field origin from the last ``resolve()`` (field -> source)."""
         return getattr(self, "_sources", {})
 
+    def config_dict(self, omit_keys: list[str] | None = None) -> dict:
+        """The resolved config as a machine-readable object — the structured twin of
+        :meth:`describe` (gh langstage-jupyter #88 / langstage-vscode #71).
+
+        ``--show-config`` is the family's config-diagnostic verb, but it emitted only
+        aligned human text, so a CI/tooling consumer had to regex the ``[source]``
+        bracket out of formatted output — brittle, and it breaks the moment the human
+        layout is tweaked. This returns the same value + provenance every surface's
+        ``--show-config --json`` renders, so the config-precedence contract becomes
+        assertable instead of scrape-only.
+
+        Same key set and the same source labels as :meth:`describe` (a test pins that
+        they agree); ``omit_keys`` hides the same inherited keys a stage doesn't honor.
+        Shape::
+
+            {"config": {"<field>": {"value", "source", "env", "legacy_env", "toml"}},
+             "toml": {"found": bool, "path": <abs or None>}}
+
+        A host that tracks more (e.g. langstage-jupyter's malformed-TOML flag, gh #86)
+        extends the ``toml`` block in its own override.
+        """
+        omit = set(omit_keys or ())
+        env_map = type(self)._env_map()
+        toml_map = type(self)._toml_map()
+        src = self.sources
+        config: dict[str, dict] = {}
+        for f in fields(self):
+            if f.name in omit:
+                continue
+            entry: dict = {
+                "value": getattr(self, f.name),
+                "source": src.get(f.name, "default"),
+                "env": None,
+                "legacy_env": None,
+                "toml": toml_map.get(f.name),
+            }
+            if f.name in env_map:
+                canonical, legacy = _env_pair(env_map[f.name][0])
+                entry["env"] = canonical
+                entry["legacy_env"] = legacy if legacy != canonical else None
+            config[f.name] = entry
+        toml_paths = getattr(self, "_toml_paths", [])
+        toml_block = {
+            "found": bool(toml_paths),
+            "path": str(toml_paths[-1]) if toml_paths else None,
+        }
+        return {"config": config, "toml": toml_block}
+
     def describe(
         self,
         omit_keys: list[str] | None = None,

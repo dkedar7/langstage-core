@@ -579,3 +579,43 @@ class TestMalformedEnvValue:
         cfg = HostConfig.resolve(env={"DEEPAGENT_PORT": "abc"}, use_toml=False)
         assert cfg.port == 8050
         assert cfg.sources["port"] == "default"
+
+
+class TestConfigDict:
+    """The machine-readable twin of describe() (gh langstage-jupyter #88 / -vscode #71)."""
+
+    def test_shape_and_provenance(self, isolated_global):
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "9001"}, use_toml=False)
+        d = cfg.config_dict()
+        port = d["config"]["port"]
+        assert port["value"] == 9001
+        assert port["source"] == "env:LANGSTAGE_PORT"
+        assert port["env"] == "LANGSTAGE_PORT"
+        assert port["legacy_env"] == "DEEPAGENT_PORT"
+        assert port["toml"] == "server.port"
+        assert d["toml"] == {"found": False, "path": None}
+
+    def test_toml_block_reports_found_path(self, isolated_global, tmp_path):
+        _toml(tmp_path, "[server]\nport = 8123\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.config_dict()["toml"]["found"] is True
+        assert cfg.config_dict()["toml"]["path"].endswith(("langstage.toml", "deepagents.toml"))
+        assert cfg.config_dict()["config"]["port"]["value"] == 8123
+
+    def test_omit_keys_hides_them(self, isolated_global):
+        cfg = HostConfig.resolve(env={}, use_toml=False)
+        d = cfg.config_dict(omit_keys=["host", "port"])
+        assert "host" not in d["config"] and "port" not in d["config"]
+
+    def test_agrees_with_describe_on_keys_and_sources(self, isolated_global, tmp_path):
+        # The anti-drift guard: config_dict() must name the same keys and the same
+        # source as the human describe() table for every field.
+        import re
+
+        _toml(tmp_path, "[server]\nport = 8123\n")
+        cfg = HostConfig.resolve(env={"LANGSTAGE_HOST": "0.0.0.0"}, toml_start=tmp_path)
+        d = cfg.config_dict()
+        text_sources = dict(re.findall(r"  (\w+)\s+= .*?\[([^\]]+)\]", cfg.describe()))
+        for key, entry in d["config"].items():
+            assert key in text_sources, f"{key} in config_dict but not describe()"
+            assert entry["source"] == text_sources[key], f"{key} source drift"

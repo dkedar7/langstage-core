@@ -102,6 +102,17 @@ def build_agent(
         from ag_ui_langgraph import LangGraphAgent
     except ImportError as e:  # pragma: no cover - exercised only without the extra
         raise RuntimeError(_IMPORT_HINT) from e
+    # Accept the library's headline input form — a `module:attr` / `path/to/file.py:attr`
+    # spec string — not just a compiled graph, so the Python one-shot surface matches
+    # the CLI (`langstage-agui --agent my_agent.py:graph`). Passing a spec used to fail
+    # with a cryptic leaked-LangGraph `AttributeError: 'str' object has no attribute
+    # 'nodes'`; now it resolves through the same load_agent_spec() the CLI uses. Because
+    # run_turn / verify / collect_* all route a non-agent through build_agent, they
+    # inherit spec support from this one point. (gh #112)
+    if isinstance(graph, str):
+        from ..host import load_agent_spec
+
+        graph = load_agent_spec(graph)
     # AG-UI requires threaded state — the adapter calls graph.aget_state() and
     # supports interrupts/resume, both of which need a checkpointer. Many user
     # graphs are compiled without one (and would otherwise hard-crash with
@@ -286,6 +297,15 @@ def _normalize_interrupt(payload, default_decisions=_DEFAULT_DECISIONS):
             )
         if payload:  # a plain dict interrupt value -> a single action request
             return [payload], [], list(default_decisions)
+        return [], [], list(default_decisions)
+    # A bare string / scalar — the canonical `interrupt("Approve deleting X?")` HITL
+    # form — must surface as a single action request, not vanish to an empty list
+    # that renders "(no action details provided)" and asks the human to approve
+    # blind (gh langstage-cli #95). Renderers already handle a scalar request
+    # (cli's format_interrupt_request returns str(action)); the bug was that this
+    # normalizer dropped it before any renderer saw it.
+    if payload is not None and payload != "":
+        return [payload], [], list(default_decisions)
     return [], [], list(default_decisions)
 
 
@@ -617,7 +637,12 @@ async def iter_event_frames(
                     try:
                         payload = json.loads(payload)
                     except json.JSONDecodeError:
-                        payload = {}
+                        # A non-JSON string is the canonical `interrupt("Approve X?")`
+                        # HITL form — keep it as the string so _normalize_interrupt
+                        # surfaces it as a single action request, instead of dropping
+                        # it to `{}` (which rendered "(no action details provided)" and
+                        # asked the human to approve blind). (gh langstage-cli #95)
+                        pass
                 action_requests, review_configs, decisions = _normalize_interrupt(
                     payload, allowed_decisions
                 )
