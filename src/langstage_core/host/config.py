@@ -156,10 +156,43 @@ def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
 
 
 def _env_bool(value: str | None, default: bool = False) -> bool:
-    """Parse an env-var string into a bool."""
+    """Parse an env-var string into a bool, leniently (never raises).
+
+    Absent/empty -> ``default``; a present but non-truthy value -> ``False``. Kept
+    lenient for direct flag reads (``if _env_bool(os.getenv("LANGSTAGE_SUPPRESS_..."))``)
+    where a typo should just mean "off", not crash a diagnostic. Config-resolution
+    boolean *fields* use :func:`_env_bool_strict` instead, so a malformed value there
+    is flagged with a note and falls back to the field default.
+    """
     if value is None or value == "":
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+
+
+def _env_bool_strict(value: str) -> bool:
+    """Parse a boolean env value, raising ``ValueError`` on an unrecognized string.
+
+    The caster for boolean *config fields* in ``_ENV`` maps. A malformed boolean
+    (``MEMORY_ENABLED=enabled`` — a natural way to try to *enable* something) used to
+    coerce silently to ``False`` and flip a ``True`` default off, with ``--show-config``
+    even crediting ``[env:...]`` as if honored (gh langstage-hermes #92). Raising here
+    lets ``resolve()``'s guard catch it, emit the same one-line ``note:`` a malformed
+    *numeric* env already gets (gh #83/#104), and fall back to the field's default —
+    so booleans and numbers degrade consistently. Recognized: ``1/true/yes/on`` ->
+    True, ``0/false/no/off`` -> False (case-insensitive); anything else raises.
+    """
+    v = str(value).strip().lower()
+    if v in _TRUTHY:
+        return True
+    if v in _FALSY:
+        return False
+    raise ValueError(
+        f"unrecognized boolean {value!r}; expected one of {', '.join(_TRUTHY + _FALSY)}"
+    )
 
 
 # ── TOML layer ───────────────────────────────────────────────────────
@@ -306,7 +339,7 @@ class HostConfig:
         "workspace_root": ("LANGSTAGE_WORKSPACE_ROOT", Path),
         "host": ("LANGSTAGE_HOST", str),
         "port": ("LANGSTAGE_PORT", int),
-        "debug": ("LANGSTAGE_DEBUG", _env_bool),
+        "debug": ("LANGSTAGE_DEBUG", _env_bool_strict),
         "title": ("LANGSTAGE_TITLE", str),
     }
     # field -> dotted key in deepagents.toml

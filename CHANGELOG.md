@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.0.29] - 2026-07-25
+
+### Fixed
+- **A build/clone failure in `SessionAdapter._produce` is now a clean `error` frame, not a silent
+  hang (gh #115).** `build_agent(self._graph)` and `self._agui_agent.clone()` ran *outside* the
+  `try/except` that records the terminal outcome — it wrapped only the `iter_event_frames` loop. So
+  if building or cloning the agent raised (a graph `build_agent` can't wrap, a version-incompatible
+  `ag-ui-langgraph`, or the documented bare install without the `[agui]` extra), the exception
+  escaped `_produce` uncaught: the session pushed no terminal frame, `session.outcome`/`error` stayed
+  `None`, and the background task was orphaned. Because `SessionAdapter` drives the task board, the
+  web SSE stream, and the VS Code sidecar, a recoverable error became a **silent infinite hang** — a
+  task wedged in `ongoing` forever with `error=None`, or an SSE client getting keepalives with no
+  `error` frame. Build/clone now run inside the `try`, so such a failure degrades exactly like a
+  stream error: an `error` frame plus `outcome="error"`.
+- **A malformed *boolean* config env var now degrades with a note, like a malformed numeric one
+  (support for langstage-hermes #92).** The boolean env caster silently coerced any unrecognized
+  value to `False` — so `LANGSTAGE_DEBUG=enabled` (a natural way to try to turn something *on*)
+  flipped a default off with no warning, and `--show-config` credited `[env:...]` as if honored. New
+  `_env_bool_strict` (the caster for boolean config *fields*) raises `ValueError` on an unrecognized
+  value so `resolve()`'s guard emits the same one-line `note:` a malformed numeric env already gets
+  (gh #83/#104) and falls back to the field default — booleans and numbers degrade consistently. The
+  plain `_env_bool` stays lenient for direct flag reads (`if _env_bool(os.getenv("…SUPPRESS…"))`),
+  where a typo should mean "off", not crash a diagnostic. Recognized: `1/true/yes/on` / `0/false/no/off`.
+  Hosts with their own boolean fields (langstage-hermes) adopt `_env_bool_strict` on their next release.
+
 ## [1.0.28] - 2026-07-25
 
 ### Fixed

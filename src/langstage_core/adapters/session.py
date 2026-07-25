@@ -235,15 +235,23 @@ class SessionAdapter:
         session.interrupt = None
         session.error = None
         pending_interrupt: dict[str, Any] | None = None
-        if self._agui_agent is None:
-            self._agui_agent = build_agent(self._graph)
-        # Clone per turn: the ag-ui-langgraph agent carries per-run state, so
-        # concurrent sessions (the task runner runs many at once) must not share
-        # one instance. clone() keeps the graph + checkpointer (thread state) but
-        # isolates the run — the same pattern build_app uses per request.
-        run_agent = self._agui_agent.clone()
-        thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
         try:
+            # build_agent()/clone() run INSIDE the try: a graph build_agent can't wrap,
+            # a version-incompatible ag-ui-langgraph, or the documented bare install
+            # without the [agui] extra all raise HERE, before the stream. Left outside
+            # the try, that exception escaped _produce uncaught — the session pushed no
+            # terminal frame, session.outcome/error stayed None, the task wedged in
+            # `ongoing` forever (error=None) and the SSE client got keepalives with no
+            # `error` frame. Now a build/clone failure degrades exactly like a stream
+            # error below: an `error` frame + session.outcome="error". (gh #115)
+            if self._agui_agent is None:
+                self._agui_agent = build_agent(self._graph)
+            # Clone per turn: the ag-ui-langgraph agent carries per-run state, so
+            # concurrent sessions (the task runner runs many at once) must not share
+            # one instance. clone() keeps the graph + checkpointer (thread state) but
+            # isolates the run — the same pattern build_app uses per request.
+            run_agent = self._agui_agent.clone()
+            thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
             async for data in iter_event_frames(
                 run_agent,
                 message,

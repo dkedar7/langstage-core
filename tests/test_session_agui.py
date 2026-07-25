@@ -236,3 +236,23 @@ async def test_push_event_side_channel():
     adapter.push_event("s", {"type": "file_changed", "path": "x.py"})
     frames = _drain(adapter.get("s").event_queue)
     assert any(f.get("type") == "file_changed" for f in frames)
+
+
+async def test_build_error_becomes_a_clean_error_outcome_not_a_wedge():
+    """gh #115: build_agent()/clone() run inside _produce's try, so a graph the adapter
+    can't build (or a missing [agui] extra) degrades to an `error` frame + outcome
+    'error' — instead of an uncaught exception escaping _produce, which left the
+    session with no terminal frame, outcome/error None, and a task wedged forever."""
+    from langstage_core import SessionAdapter
+
+    adapter = SessionAdapter(graph=object())  # build_agent can't wrap a bare object
+    session = adapter.get_or_create("s115")
+
+    # must NOT raise out of _produce
+    await asyncio.wait_for(adapter._produce(session, message="hi"), timeout=5)
+    assert session.outcome == "error"
+    assert session.error and "AttributeError" in session.error
+    kinds = []
+    while not session.event_queue.empty():
+        kinds.append(session.event_queue.get_nowait().get("type"))
+    assert "error" in kinds, kinds
