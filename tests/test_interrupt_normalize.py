@@ -181,10 +181,16 @@ def test_scalar_interrupt_surfaces_but_empty_still_vanishes():
     assert _normalize_interrupt(None)[0] == []
 
 
-def test_string_interrupt_renders_end_to_end():
+import pytest
+
+
+@pytest.mark.parametrize("wire", ["event", "chunk"])
+def test_string_interrupt_renders_end_to_end(wire):
     """Drive a real graph that raises interrupt("...") and confirm the interrupt frame
-    carries the string, not an empty request (the cli #95 symptom, at the frame layer)."""
-    from langstage_core.agui import build_agent, iter_event_frames
+    carries the string on BOTH wires — the cli #95 symptom lived in the on_interrupt
+    handler, which exists once per wire. (cli uses the chunk wire; the web/vscode
+    surfaces use the event wire — both must surface the string.)"""
+    from langstage_core.agui import build_agent, iter_chunk_frames, iter_event_frames
 
     def ask(state):
         interrupt("Approve deleting ALL files? (y/n)")
@@ -196,10 +202,17 @@ def test_string_interrupt_renders_end_to_end():
     b.add_edge("ask", END)
     agent = build_agent(b.compile(checkpointer=InMemorySaver()))
 
+    it = iter_event_frames if wire == "event" else iter_chunk_frames
+
     async def go():
-        return [f async for f in iter_event_frames(agent, "go", "s95")]
+        return [f async for f in it(agent, "go", f"s95-{wire}")]
 
     frames = asyncio.run(go())
-    interrupts = [f for f in frames if f.get("type") == "interrupt"]
-    assert interrupts, frames
-    assert interrupts[0]["action_requests"] == ["Approve deleting ALL files? (y/n)"]
+    # event wire: {"type":"interrupt","action_requests":[...]}
+    # chunk wire: {"status":"interrupt","interrupt":{"action_requests":[...]}}
+    if wire == "event":
+        hits = [f["action_requests"] for f in frames if f.get("type") == "interrupt"]
+    else:
+        hits = [f["interrupt"]["action_requests"] for f in frames if f.get("status") == "interrupt"]
+    assert hits, frames
+    assert hits[0] == ["Approve deleting ALL files? (y/n)"]

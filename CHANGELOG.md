@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.28] - 2026-07-25
+
+### Fixed
+- **The scalar-interrupt fix (cli #95) also covers the chunk wire now.** 1.0.27 fixed the
+  `on_interrupt` handler on the event wire but missed the identical handler on the chunk wire —
+  the one the CLI actually consumes — so a bare-string `interrupt("Approve X?")` still rendered
+  "(no action details provided)" in `langstage-cli` on 1.0.27. Both handlers now keep a non-JSON
+  string, and the end-to-end regression test is parametrized over both wires so this can't recur.
+
 ## [1.0.27] - 2026-07-25
 
 ### Fixed

@@ -848,7 +848,10 @@ async def iter_chunk_frames(
                     try:
                         payload = json.loads(payload)
                     except json.JSONDecodeError:
-                        payload = {}
+                        # A non-JSON string is the canonical `interrupt("Approve X?")`
+                        # HITL form — keep it so _normalize_interrupt surfaces it as a
+                        # single action request instead of dropping it to `{}`. (cli #95)
+                        pass
                 # Normalize to a dict with action_requests so a chunk-wire consumer
                 # (cli: interrupt_data.get("action_requests")) doesn't crash on the
                 # standard HumanInterrupt *list* shape and gets a populated request. (#40)
