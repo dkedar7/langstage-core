@@ -162,3 +162,44 @@ def test_resume_with_raw_payload_still_works():
     assert not any(f.get("type") == "error" for f in frames), frames
     content = "".join(f.get("content", "") for f in frames if f.get("type") == "content")
     assert "chose: accept" in content
+
+
+# ── gh langstage-cli #95: a bare-string / scalar interrupt must surface ──────────
+def test_plain_string_interrupt_becomes_a_single_action_request():
+    """The canonical `interrupt("Approve deleting X?")` HITL form used to normalize to
+    an EMPTY action_requests list -> renderers showed "(no action details provided)"
+    and asked the human to approve blind. It now surfaces as a single request the
+    renderer can display (cli's format_interrupt_request returns str(action))."""
+    ars, _reviews, decisions = _normalize_interrupt("Approve deleting ALL files in /home?")
+    assert ars == ["Approve deleting ALL files in /home?"]
+    assert decisions  # still offers the default decisions
+
+
+def test_scalar_interrupt_surfaces_but_empty_still_vanishes():
+    assert _normalize_interrupt(42)[0] == [42]
+    assert _normalize_interrupt("")[0] == []      # a degenerate empty payload
+    assert _normalize_interrupt(None)[0] == []
+
+
+def test_string_interrupt_renders_end_to_end():
+    """Drive a real graph that raises interrupt("...") and confirm the interrupt frame
+    carries the string, not an empty request (the cli #95 symptom, at the frame layer)."""
+    from langstage_core.agui import build_agent, iter_event_frames
+
+    def ask(state):
+        interrupt("Approve deleting ALL files? (y/n)")
+        return {"messages": [AIMessage(content="done")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("ask", ask)
+    b.add_edge(START, "ask")
+    b.add_edge("ask", END)
+    agent = build_agent(b.compile(checkpointer=InMemorySaver()))
+
+    async def go():
+        return [f async for f in iter_event_frames(agent, "go", "s95")]
+
+    frames = asyncio.run(go())
+    interrupts = [f for f in frames if f.get("type") == "interrupt"]
+    assert interrupts, frames
+    assert interrupts[0]["action_requests"] == ["Approve deleting ALL files? (y/n)"]

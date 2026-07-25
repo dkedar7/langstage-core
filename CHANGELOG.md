@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.0.27] - 2026-07-25
+
+### Fixed
+- **A bare-string `interrupt("Approve deleting X?")` — the canonical LangGraph HITL form —
+  no longer vanishes; the human sees what they're approving (gh langstage-cli #95).** The
+  `on_interrupt` handler ran `json.loads()` on a string interrupt value and, when it wasn't valid
+  JSON (a plain question almost never is), fell back to `{}` — so `_normalize_interrupt` produced
+  an **empty** `action_requests` and every surface rendered "(no action details provided)", asking
+  the human to Approve/Reject blind. That defeats the entire point of HITL. Now a non-JSON string
+  is kept as the string, and `_normalize_interrupt` surfaces any scalar/string payload as a single
+  action request (renderers already handle a scalar — cli's `format_interrupt_request` returns
+  `str(action)`). Dict-payload interrupts are unaffected. Fixed on both wires, so cli, the web
+  app, and the vscode sidecar all benefit.
+
+### Added
+- **The one-shot Python surface accepts a spec string, matching the CLI (gh #112).** `build_agent`,
+  `run_turn`, `verify`, `collect_event_frames`, and `collect_chunk_frames` took only a compiled
+  graph or a prebuilt agent — so passing the library's own headline input form, a `module:attr` /
+  `path/to/file.py:attr` spec, failed with a cryptic leaked-LangGraph `AttributeError: 'str' object
+  has no attribute 'nodes'`, even though every CLI surface (`langstage-agui --agent …`, `--verify`,
+  `--show-config`) already resolves specs. `build_agent` now resolves a `str` through the same
+  `load_agent_spec()`, and because `run_turn`/`verify`/`collect_*` route any non-agent through
+  `build_agent`, the whole one-shot surface inherits spec support from one point — the eval/batch/CI
+  use case the collectors were built for (agents identified by spec).
+- **`HostConfig.config_dict()` — a machine-readable twin of `describe()` for `--show-config --json`
+  (support for langstage-jupyter #88 and langstage-vscode #71).** `--show-config` is the family's
+  config-diagnostic verb but emitted only aligned human text, so a CI/tooling consumer had to regex
+  the `[source]` bracket out of formatted output — brittle, and config-source correctness is the
+  most bug-prone area in the family (a dense history of precedence/advertising regressions).
+  `config_dict()` returns the same value + provenance (`{value, source, env, legacy_env, toml}` per
+  key, plus a `toml: {found, path}` block) that `describe()` formats, so a surface can emit
+  `--show-config --json` and a pipeline can assert on the precedence contract. A test pins that
+  `config_dict()` and `describe()` never drift on keys or sources.
+
 ## [1.0.26] - 2026-07-23
 
 ### Added
