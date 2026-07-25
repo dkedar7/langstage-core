@@ -619,3 +619,51 @@ class TestConfigDict:
         for key, entry in d["config"].items():
             assert key in text_sources, f"{key} in config_dict but not describe()"
             assert entry["source"] == text_sources[key], f"{key} source drift"
+
+
+class TestStrictBoolEnv:
+    """A malformed BOOLEAN env value degrades with a note, like a malformed numeric one
+    (gh langstage-hermes #92) — the strict caster raises so resolve()'s guard fires."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_note_dedupe(self):
+        import langstage_core.host.config as cfg
+
+        getattr(cfg, "_warned_malformed_env_value", set()).clear()
+        yield
+        getattr(cfg, "_warned_malformed_env_value", set()).clear()
+
+    def test_strict_bool_recognizes_truthy_and_falsy(self):
+        from langstage_core.host.config import _env_bool_strict
+
+        for v in ("1", "true", "YES", "on"):
+            assert _env_bool_strict(v) is True
+        for v in ("0", "false", "No", "OFF"):
+            assert _env_bool_strict(v) is False
+
+    def test_strict_bool_raises_on_unrecognized(self):
+        from langstage_core.host.config import _env_bool_strict
+
+        for v in ("enabled", "disabled", "maybe", "y", "t", "2"):
+            with pytest.raises(ValueError):
+                _env_bool_strict(v)
+
+    def test_lenient_env_bool_unchanged_for_flag_reads(self):
+        # The suppress-flag direct callers stay lenient and never raise: a present but
+        # non-truthy value is False; `default` applies only to absent/empty.
+        from langstage_core.host.config import _env_bool
+
+        assert _env_bool("garbage") is False  # present-but-unrecognized -> False (no raise)
+        assert _env_bool("on") is True
+        assert _env_bool(None, default=True) is True  # absent -> default
+        assert _env_bool("", default=True) is True
+
+    def test_bad_boolean_env_degrades_to_default_with_a_note(self, isolated_global, capsys):
+        cfg = HostConfig.resolve(env={"LANGSTAGE_DEBUG": "enabled"}, use_toml=False)
+        assert cfg.debug is False  # the default, not a silent flip
+        assert cfg.sources["debug"] == "default"  # NOT env
+        assert "ignoring malformed LANGSTAGE_DEBUG" in capsys.readouterr().err
+
+    def test_valid_boolean_env_still_resolves(self, isolated_global):
+        assert HostConfig.resolve(env={"LANGSTAGE_DEBUG": "true"}, use_toml=False).debug is True
+        assert HostConfig.resolve(env={"LANGSTAGE_DEBUG": "off"}, use_toml=False).debug is False
