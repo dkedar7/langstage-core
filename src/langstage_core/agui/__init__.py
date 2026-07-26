@@ -113,6 +113,24 @@ def build_agent(
         from ..host import load_agent_spec
 
         graph = load_agent_spec(graph)
+    # Validate we actually hold a COMPILED LangGraph graph before handing it to the
+    # adapter. A compiled graph exposes ``aget_state`` (the adapter calls it); an
+    # uncompiled ``StateGraph``, a ``dict``, ``None``, or a bare function do not — and
+    # passing one used to reach ``LangGraphAgent(...)`` / ``graph.run()`` and surface a
+    # cryptic leaked-LangGraph ``AttributeError`` ('X' object has no attribute 'nodes'/
+    # 'run'/'aget_state') to the user. Fail fast with an actionable message instead —
+    # the same DX fix gh #112 (spec strings) and gh #100 made elsewhere, here for the
+    # wrong-type / forgot-to-``.compile()`` cases (gh langstage-jupyter #92).
+    if not hasattr(graph, "aget_state"):
+        if hasattr(graph, "compile") and hasattr(graph, "add_node"):
+            raise TypeError(
+                "build_agent expected a compiled LangGraph graph, but got an "
+                "uncompiled StateGraph; call .compile() on it first."
+            )
+        raise TypeError(
+            "build_agent expected a compiled LangGraph graph (CompiledStateGraph) "
+            f"or an agent spec string, but got {type(graph).__name__}."
+        )
     # AG-UI requires threaded state — the adapter calls graph.aget_state() and
     # supports interrupts/resume, both of which need a checkpointer. Many user
     # graphs are compiled without one (and would otherwise hard-crash with
@@ -331,7 +349,50 @@ def _truncate_result(result, max_result_len):
     return result
 
 
-def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, step_nodes, current_node):
+async def _full_text_by_id(agent, thread_id):
+    """Map ``message id -> full text`` (ALL text blocks joined) from the graph checkpoint.
+
+    ag-ui's ``resolve_message_content`` flattens a multi-text-block ``AIMessage`` to
+    only its FIRST text block (``ag_ui_langgraph/utils.py``), so the final
+    ``MessagesSnapshotEvent`` that a non-streamed turn relies on carries a truncated
+    assistant ``content`` — later text blocks vanish with no error, and the client shows
+    a plausible-but-partial reply (gh langstage-vscode #75). We re-read the ORIGINAL
+    LangChain messages from the graph's checkpoint and use ``message.text`` (which joins
+    all ``text`` blocks like ``AIMessage.text``, and ignores reasoning/thinking blocks —
+    those already surface as separate ``reasoning`` frames). Best-effort: any failure
+    (no ``.graph``, no checkpointer, an odd state schema) returns ``{}`` and the snapshot
+    walk falls back to ag-ui's (possibly truncated) content — never fatal.
+    """
+    graph = getattr(agent, "graph", None)
+    aget_state = getattr(graph, "aget_state", None)
+    if aget_state is None:
+        return {}
+    try:
+        state = await aget_state({"configurable": {"thread_id": thread_id}})
+    except Exception:  # pragma: no cover - best-effort fidelity, never fatal
+        return {}
+    values = getattr(state, "values", None) or {}
+    out: dict[str, str] = {}
+    for m in values.get("messages", []) or []:
+        mid = getattr(m, "id", None)
+        if mid is None:
+            continue
+        text = getattr(m, "text", None)
+        # langchain_core >=1.x exposes ``.text`` as a property returning a str (a
+        # callable str subclass, for back-compat); older versions expose a ``.text()``
+        # method. Read the property value; only CALL it when it isn't already a str (the
+        # real-method case) — so we neither miss it nor trip the deprecation warning.
+        if callable(text) and not isinstance(text, str):
+            try:
+                text = text()
+            except Exception:  # pragma: no cover
+                text = None
+        if isinstance(text, str) and text:
+            out[str(mid)] = str(text)
+    return out
+
+
+def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, step_nodes, current_node, full_text_by_id=None):
     """Yield the not-yet-emitted items from a final ``MessagesSnapshotEvent``.
 
     Shared by both ``iter_*`` mappings so the two wires can't drift on snapshot
@@ -397,7 +458,15 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
                 if getattr(m, "id", None) not in streamed_ids:
                     idx = ci - offset
                     node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                    yield {"kind": "content", "text": content, "node": node}
+                    # Prefer the ORIGINAL message's full text: ag-ui's
+                    # resolve_message_content flattens a multi-text-block AIMessage to
+                    # only its FIRST block, so the snapshot ``content`` silently drops
+                    # later blocks (gh langstage-vscode #75). full_text_by_id carries the
+                    # checkpoint message's joined ``.text`` keyed by id; fall back to
+                    # ag-ui's content when absent (single-block, tool-only, or no state).
+                    mid = getattr(m, "id", None)
+                    text = full_text_by_id.get(str(mid), content) if full_text_by_id else content
+                    yield {"kind": "content", "text": text, "node": node}
                 ci += 1
         elif role == "tool":
             tcid = getattr(m, "tool_call_id", None)
@@ -552,6 +621,16 @@ async def iter_event_frames(
     errored_tools: dict[str, int] = {}
 
     try:
+        # Accept a bare compiled graph, not just a prebuilt LangGraphAgent (gh #117):
+        # anything that already exposes ``.run`` — a LangGraphAgent, or a test double —
+        # is driven directly; a raw ``CompiledStateGraph`` / spec string (no ``.run``) is
+        # auto-wrapped via build_agent, so ``iter_event_frames(compiled_graph, ...)``
+        # streams — matching the collectors and the README's "Stream any CompiledGraph"
+        # claim — instead of surfacing a cryptic ``'CompiledStateGraph' object has no
+        # attribute 'run'`` error frame. A genuinely bad input makes build_agent raise a
+        # clean TypeError -> a terminal ``error`` frame via the except below, never a
+        # leaked AttributeError.
+        agent = agent if hasattr(agent, "run") else build_agent(agent)
         async for ev in agent.run(run_input):
             t = type(ev).__name__
             if t == "StepStartedEvent":
@@ -659,6 +738,9 @@ async def iter_event_frames(
                 # its tool call/result and a tool-call-only AIMessage isn't dropped
                 # (gh #91), while a mixed turn still emits a later node's finished
                 # AIMessage (gh #89) and a fully-streamed turn double-renders nothing.
+                # full_text_by_id restores multi-text-block assistant content that the
+                # ag-ui snapshot flattens to its first block (gh langstage-vscode #75).
+                full_text_by_id = await _full_text_by_id(agent, thread_id)
                 for item in _snapshot_items(
                     ev.messages,
                     streamed_ids=streamed_ids,
@@ -666,6 +748,7 @@ async def iter_event_frames(
                     streamed_result_ids=streamed_result_ids,
                     step_nodes=step_nodes,
                     current_node=current_node,
+                    full_text_by_id=full_text_by_id,
                 ):
                     if item["kind"] == "content":
                         yield {"type": "content", "content": item["text"],
@@ -783,6 +866,12 @@ async def iter_chunk_frames(
     step_nodes: list[str] = []
 
     try:
+        # Auto-wrap a bare compiled graph, exactly as iter_event_frames does (gh #117):
+        # drive anything with ``.run`` directly (a LangGraphAgent or a test double), else
+        # build it — so ``iter_chunk_frames(compiled_graph, ...)`` streams instead of a
+        # cryptic ``'CompiledStateGraph' object has no attribute 'run'`` error frame; a
+        # bad input becomes a clean terminal ``error`` frame via the except below.
+        agent = agent if hasattr(agent, "run") else build_agent(agent)
         async for ev in agent.run(run_input):
             t = type(ev).__name__
             if t == "StepStartedEvent":
@@ -871,6 +960,9 @@ async def iter_chunk_frames(
                 # non-streaming tool agent showed no tool call/result and a tool-call-only
                 # AIMessage rendered empty. Still emits a later node's finished message
                 # (gh #89) and double-renders nothing on a fully-streamed turn.
+                # full_text_by_id restores multi-text-block assistant content that the
+                # ag-ui snapshot flattens to its first block (gh langstage-vscode #75).
+                full_text_by_id = await _full_text_by_id(agent, thread_id)
                 for item in _snapshot_items(
                     ev.messages,
                     streamed_ids=streamed_ids,
@@ -878,6 +970,7 @@ async def iter_chunk_frames(
                     streamed_result_ids=streamed_result_ids,
                     step_nodes=step_nodes,
                     current_node=current_node,
+                    full_text_by_id=full_text_by_id,
                 ):
                     if item["kind"] == "content":
                         yield {"status": "streaming", "chunk": item["text"], "node": item["node"]}

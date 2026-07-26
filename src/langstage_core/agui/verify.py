@@ -75,17 +75,23 @@ async def averify(
         no error* — a missing key / broken tool / bad schema yields ``ok=False``
         with a human-readable ``reason``, never an exception to the caller.
     """
-    agent = (
-        agent_or_graph
-        if _is_langgraph_agent(agent_or_graph)
-        else build_agent(agent_or_graph)
-    )
-
     result = VerifyResult(ok=False, reason="turn produced no completion frame")
     saw_interrupt = False
 
     async def _run() -> None:
         nonlocal saw_interrupt
+        # Build INSIDE the guarded run so a bad agent — a wrong-type export (a dict,
+        # None, a function), an uncompiled StateGraph, or a spec that won't resolve —
+        # becomes a clean ok=False verdict via the except below, instead of an
+        # exception that escapes verify()/averify() and crashes the caller with a raw
+        # traceback (gh langstage-jupyter #92; the same "build inside the try" fix as
+        # SessionAdapter._produce, gh langstage-core #115). build_agent now raises an
+        # actionable TypeError for these, so the reason names what to fix.
+        agent = (
+            agent_or_graph
+            if _is_langgraph_agent(agent_or_graph)
+            else build_agent(agent_or_graph)
+        )
         async for frame in iter_event_frames(agent, message, thread_id, state=state):
             result.frames += 1
             kind = frame.get("type")

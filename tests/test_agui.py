@@ -93,3 +93,25 @@ def test_agui_run_lifecycle_and_echo():
     # (not just lifecycle) survives the bridge.
     deltas = _text_deltas(resp.text)
     assert "hi there" in deltas, f"expected echoed text in AG-UI deltas, got: {deltas!r}"
+
+
+def test_build_agent_rejects_wrong_type():
+    # gh langstage-jupyter #92: a non-graph input fails fast with an actionable
+    # TypeError, not the leaked `'dict' object has no attribute 'nodes'` from deep in
+    # the adapter (the anti-pattern gh #112 / #100 fixed elsewhere).
+    for obj in ({"hello": "world"}, None, 42):
+        with pytest.raises(TypeError, match="compiled LangGraph graph"):
+            build_agent(obj)
+
+
+def test_build_agent_rejects_uncompiled_stategraph():
+    # A StateGraph the caller forgot to .compile() gets pointed at the fix, not a
+    # cryptic 'StateGraph' object has no attribute 'aget_state' at first turn.
+    from langgraph.graph import END, MessagesState, START, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("n", lambda s: s)
+    b.add_edge(START, "n")
+    b.add_edge("n", END)
+    with pytest.raises(TypeError, match=r"\.compile\(\)"):
+        build_agent(b)  # forgot .compile()

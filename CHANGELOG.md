@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.0.30] - 2026-07-26
+
+### Fixed
+- **`iter_event_frames` / `iter_chunk_frames` now accept a bare `CompiledGraph` (gh #117).** The two
+  headline streaming mappings required a `build_agent(...)`-wrapped agent; passing a raw compiled
+  graph — which the collector siblings (`collect_event_frames`, `run_turn`) and the README's "Stream
+  any `CompiledGraph`" claim both accept — surfaced a single `error` frame carrying a leaked-LangGraph
+  `AttributeError: 'CompiledStateGraph' object has no attribute 'run'`. Both mappings now auto-wrap
+  through `build_agent` (driving anything already exposing `.run` directly), so a raw graph streams;
+  a genuinely bad input degrades to a clean terminal `error` frame instead of a cryptic one.
+- **`build_agent` rejects a non-graph / uncompiled `StateGraph` with an actionable `TypeError`
+  (support for langstage-jupyter #92).** A wrong-type object (a `dict`, `None`, a function) reached
+  `LangGraphAgent(...)` and leaked `'X' object has no attribute 'nodes'`; an uncompiled `StateGraph`
+  errored mid-turn with `'StateGraph' object has no attribute 'aget_state'`. `build_agent` now
+  validates it holds a compiled graph (exposes `aget_state`) up front and raises a clear message —
+  `"...got dict."` or `"...uncompiled StateGraph; call .compile() on it first."` — the same DX fix
+  gh #112 (spec strings) and gh #100 made elsewhere.
+- **`verify` / `averify` return a clean `ok=False` verdict for a bad agent, never a raised exception
+  (langstage-jupyter #92).** The agent was built *outside* `averify`'s guarded run, so a build
+  failure escaped `verify()` and crashed the caller with a raw traceback (the exact class of bug the
+  primitive exists to prevent). The build now runs inside the try — the same "build inside the guard"
+  fix as `SessionAdapter._produce` (gh #115) — so a wrong-type or uncompiled export is reported as a
+  failed preflight with an actionable reason.
+- **A finished multi-text-block `AIMessage` no longer loses all but its first block (gh
+  langstage-vscode #75).** ag-ui's `resolve_message_content` flattens a list-content message to only
+  its first `text` block, so the final `MessagesSnapshotEvent` a non-streamed turn relies on carried
+  a silently-truncated assistant `content` (wrong-but-plausible output, no error). The snapshot walk
+  now re-reads the original LangChain messages from the graph checkpoint and uses the message's full
+  `.text` (all text blocks joined, reasoning/thinking blocks excluded — those already surface as
+  `reasoning` frames), on both the event and chunk wires. Best-effort: any failure falls back to
+  ag-ui's content, never fatal.
+
 ## [1.0.29] - 2026-07-25
 
 ### Fixed
