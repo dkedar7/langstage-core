@@ -251,7 +251,11 @@ async def test_build_error_becomes_a_clean_error_outcome_not_a_wedge():
     # must NOT raise out of _produce
     await asyncio.wait_for(adapter._produce(session, message="hi"), timeout=5)
     assert session.outcome == "error"
-    assert session.error and "AttributeError" in session.error
+    # build_agent now rejects a non-graph with a clean, actionable TypeError (gh #92),
+    # so the wedge fix (gh #115) surfaces that instead of a leaked
+    # `'object' object has no attribute 'nodes'` AttributeError from deep in the adapter.
+    assert session.error and "TypeError" in session.error
+    assert "has no attribute" not in session.error, session.error
     kinds = []
     while not session.event_queue.empty():
         kinds.append(session.event_queue.get_nowait().get("type"))

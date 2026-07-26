@@ -752,3 +752,62 @@ async def test_streaming_turn_does_not_double_emit_tool_frames():
     frames = await _collect(iter_chunk_frames(agent, "note hi", "s91dedup"))
     assert len([f for f in frames if "tool_calls" in f]) == 1, "tool call double-emitted (streaming + snapshot)"
     assert len([f for f in frames if "tool_result" in f]) == 1, "tool result double-emitted (streaming + snapshot)"
+
+
+def _multi_text_block_graph():
+    """A non-token agent returning a finished AIMessage whose content is TWO text
+    blocks — the shape ag-ui's resolve_message_content flattens to its first block."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", lambda s: {"messages": [AIMessage(content=[
+        {"type": "text", "text": "First half of the answer. "},
+        {"type": "text", "text": "Second half of the answer."},
+    ])]})
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile()
+
+
+async def test_snapshot_joins_multi_text_block_content():
+    # gh langstage-vscode #75: a finished AIMessage with 2+ text blocks reaches the
+    # snapshot path, where ag-ui's resolve_message_content kept only the FIRST block,
+    # so the reply was silently truncated (wrong-but-plausible output, exit 0). Core now
+    # re-reads the checkpoint and uses the message's full `.text` (all text blocks
+    # joined) on BOTH wires.
+    expected = "First half of the answer. Second half of the answer."
+    ev = await _collect(iter_event_frames(build_agent(_multi_text_block_graph()), "hi", "t75e"))
+    ev_text = "".join(f["content"] for f in ev if f.get("type") == "content")
+    assert ev_text == expected, ev_text
+    ch = await _collect(iter_chunk_frames(build_agent(_multi_text_block_graph()), "hi", "t75c"))
+    ch_text = "".join(f["chunk"] for f in ch if f.get("status") == "streaming" and "chunk" in f)
+    assert ch_text == expected, ch_text
+
+
+async def test_iter_frames_accept_a_bare_compiled_graph():
+    # gh #117: the iter_* mappings must accept a raw CompiledGraph (auto-wrap via
+    # build_agent), like the collectors and the "Stream any CompiledGraph" doc claim —
+    # not just a prebuilt LangGraphAgent. Passing the compiled graph DIRECTLY (no
+    # build_agent) used to yield a single error frame carrying a leaked
+    # `'CompiledStateGraph' object has no attribute 'run'` AttributeError.
+    ev = await _collect(iter_event_frames(_two_node_graph(), "hi", "t117e"))
+    assert ev[-1] == {"type": "complete"}
+    assert not any(f.get("type") == "error" for f in ev), ev
+    assert "from first." in "".join(f.get("content", "") for f in ev if f.get("type") == "content")
+    ch = await _collect(iter_chunk_frames(_two_node_graph(), "hi", "t117c"))
+    assert ch[-1] == {"status": "complete"}
+    assert not any(f.get("status") == "error" for f in ch), ch
+
+
+async def test_iter_frames_bad_input_yield_clean_error_frame():
+    # gh #117 (the fail-fast half): a genuinely non-graph input becomes a clean
+    # terminal error frame naming the type problem — NOT a leaked raw-LangGraph
+    # AttributeError ('X' has no attribute 'run'/'nodes'), and never an escape.
+    ev = await _collect(iter_event_frames({"not": "a graph"}, "hi", "t117bad"))
+    assert ev and ev[-1]["type"] == "error"
+    assert "TypeError" in ev[-1]["error"] and "compiled LangGraph graph" in ev[-1]["error"]
+    assert "has no attribute" not in ev[-1]["error"], ev[-1]["error"]
+    ch = await _collect(iter_chunk_frames({"not": "a graph"}, "hi", "t117badc"))
+    assert ch and ch[-1]["status"] == "error"
+    assert "TypeError" in ch[-1]["error"]

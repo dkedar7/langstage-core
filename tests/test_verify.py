@@ -64,3 +64,35 @@ def test_verify_sync_wrapper_runs_a_turn():
     # The sync convenience a CLI doctor/check/selfcheck would call.
     r = verify(load_agent_spec("langstage_core.demo.stub:graph"))
     assert r.ok and r.saw_complete
+
+
+def _uncompiled_stategraph():
+    """A common mistake: exporting the StateGraph builder, forgetting .compile()."""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("n", lambda s: s)
+    b.add_edge(START, "n")
+    b.add_edge("n", END)
+    return b  # NOT compiled
+
+
+async def test_averify_wrong_type_export_fails_not_raises():
+    # gh langstage-jupyter #92: a wrong-type export (dict/None/function) used to make
+    # build_agent raise a raw AttributeError that escaped averify()/verify() and
+    # crashed the caller with a full traceback. It must now be a clean ok=False verdict
+    # with an actionable reason, never an exception.
+    r = await averify({"hello": "world"})
+    assert r.ok is False and bool(r) is False
+    assert "compiled LangGraph graph" in r.reason
+    assert "has no attribute" not in r.reason, r.reason
+
+
+async def test_averify_uncompiled_stategraph_gives_actionable_reason():
+    # gh langstage-jupyter #92 (case 2): an uncompiled StateGraph must fail with the
+    # actionable ".compile()" guidance, not a leaked internal AttributeError
+    # ('StateGraph' object has no attribute 'aget_state').
+    r = await averify(_uncompiled_stategraph())
+    assert r.ok is False
+    assert ".compile()" in r.reason, r.reason
+    assert "aget_state" not in r.reason, r.reason
