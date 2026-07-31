@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.0.31] - 2026-07-31
+
+### Fixed
+- **`verify` / `averify` now fail an EMPTY completed turn (gh #119).** A graph that loaded and
+  reached a `complete` frame but produced zero content / tool calls / reasoning reported `ok: one
+  turn completed cleanly (0 chars)` and exited 0 — the exact "false green" the module exists to
+  prevent, and one of the two failures the README says `--verify` catches ("a graph that loads but
+  yields an empty ... turn"). The verdict now requires the turn to produce some output; a
+  tool-call-only or reasoning turn still counts (it did work), a bare empty complete does not, with
+  reason `"turn completed but produced no content (0 chars)"`.
+- **`verify` / `averify` now treat a HITL interrupt as a HEALTHY preflight, not a failure (support
+  for langstage-jupyter #95).** A turn that reaches a well-formed `interrupt` is the human-in-the-loop
+  feature *working* — the agent ran and paused for a decision, which is neither an error nor an empty
+  turn. It now reports `ok=True` (`"turn paused cleanly on an interrupt (HITL agent)"`), so
+  preflighting an approval-gated agent in CI no longer red-fails it. This intentionally supersedes the
+  earlier "an interrupt isn't a clean pass" stance (gh #110), which the nightly routine showed broke
+  the advertised HITL preflight for an entire class of healthy agents. (`_terminal_outcome` and the
+  collectors are unchanged — only verify's pass/fail derivation.)
+
+### Added
+- **`langstage-agui --message "..."` / `-m` — a one-shot "run my prompt and print the reply" (gh
+  #120).** The terminal smoke-test companion to `--verify`: `--verify` proves the agent *runs* with a
+  canned, discarded probe; `--message` runs your OWN prompt and streams the answer to stdout, with no
+  Python and no server. `--json` prints the typed `TurnResult` (text / tool_calls / extractions /
+  reasoning / outcome / interrupt / error) for scripting. Exit code mirrors the turn outcome
+  (`complete`=0 / `error`=1 / `interrupted`=2), consistent with `--verify`. A thin wrapper over the
+  shipped chunk wire — the natural `--show-config` → `--verify` → `--message` progression.
+
+### Docs
+- **"Connect a real model" README quickstart + the `[real]` extra is now documented (gh #121).** The
+  docs took adopters through the keyless demos and stopped exactly at "now point this at my real
+  model"; the shipped `[real]` extra (`langchain-openai` + `langgraph`) was referenced nowhere. Added a
+  minimal, provider-neutral `pip install "langstage-core[agui,real]"` + `create_react_agent` example
+  (OpenAI / OpenRouter / any OpenAI-compatible endpoint), noting the deepagents + Anthropic stack as
+  the alternative.
+- **"Delegate work to a background task" README quickstart + fixed the `tasks/__init__.py` docstring
+  (gh #122).** The task engine was a headline capability with no runnable example, and the only worked
+  snippet (the module docstring) referenced an undefined `adapter` and stopped at `enqueue` without
+  reading the result. Added a verified end-to-end enqueue → poll `TERMINAL_STATES` → read
+  `task["result"]` example (a `Task` is a `TypedDict`), in both the README and the docstring.
+
 ## [1.0.30] - 2026-07-26
 
 ### Fixed

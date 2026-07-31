@@ -96,3 +96,87 @@ async def test_averify_uncompiled_stategraph_gives_actionable_reason():
     assert r.ok is False
     assert ".compile()" in r.reason, r.reason
     assert "aget_state" not in r.reason, r.reason
+
+
+def _empty_turn_graph():
+    """Loads and completes fine, but appends NO assistant message — the empty turn."""
+    from langgraph.graph import END, MessagesState, START, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", lambda s: {})  # no message appended
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile()
+
+
+async def test_averify_empty_turn_fails():
+    # gh #119: a graph that loads and completes but produces ZERO content is the
+    # "false green" --verify is documented to catch — ok=False, not a clean pass.
+    r = await averify(_empty_turn_graph())
+    assert r.ok is False and bool(r) is False
+    assert r.saw_complete and not r.saw_error
+    assert r.content_chars == 0
+    assert "no content" in r.reason or "0 chars" in r.reason, r.reason
+
+
+async def test_averify_blank_aimessage_turn_fails():
+    # The realistic variant: a node returns AIMessage(content="") (a model that
+    # returned nothing). Still zero content -> not a clean pass (gh #119).
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, MessagesState, START, StateGraph
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", lambda s: {"messages": [AIMessage(content="")]})
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    r = await averify(b.compile())
+    assert r.ok is False
+    assert r.content_chars == 0
+
+
+def _hitl_graph():
+    """A keyless HITL agent: pauses once on a well-formed interrupt."""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, MessagesState, START, StateGraph
+    from langgraph.types import interrupt
+
+    def node(state):
+        d = interrupt({"question": "Approve?"})
+        return {"messages": [AIMessage(content=f"done {d}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("node", node)
+    b.add_edge(START, "node")
+    b.add_edge("node", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+async def test_averify_hitl_interrupt_is_a_healthy_preflight():
+    # gh langstage-jupyter #95: a HITL agent that reaches a well-formed interrupt is a
+    # HEALTHY preflight outcome (the human-in-the-loop feature working), not a failure.
+    # This intentionally supersedes the earlier "interrupt = not a clean pass" (gh #110).
+    r = await averify(_hitl_graph())
+    assert r.ok is True and bool(r) is True
+    assert "interrupt" in r.reason.lower(), r.reason
+
+
+async def test_averify_tool_only_turn_is_not_empty():
+    # A turn that calls a tool but emits no assistant text is NOT the empty-turn false
+    # green (gh #119) — it did real work. content_chars can be 0 yet ok=True.
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langgraph.graph import END, MessagesState, START, StateGraph
+
+    def respond(state):
+        # A finished AIMessage carrying a tool call + its result, no assistant text.
+        return {"messages": [
+            AIMessage(content="", tool_calls=[{"name": "ping", "args": {}, "id": "c1"}]),
+            ToolMessage(content="pong", tool_call_id="c1"),
+        ]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    r = await averify(b.compile())
+    assert r.ok is True, r.reason

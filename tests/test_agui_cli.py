@@ -186,3 +186,42 @@ class TestInvalidSpecFailsBeforeBanner:
         assert rc == 0
         assert marker.read_text().count("imported") == 1
         assert len(stub_serve) == 1
+
+
+class TestMessage:
+    """--message: one-shot 'run my prompt and print the reply' (gh #120).
+
+    Uses the keyless tools demo, so these need the agui extra (skip without it).
+    """
+
+    def test_message_prints_reply_and_exits_zero(self, capsys):
+        pytest.importorskip("ag_ui_langgraph")
+        rc = main(["--demo=tools", "--message", "use a tool"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert out.strip(), "expected the reply text on stdout"
+
+    def test_message_json_emits_typed_turnresult(self, capsys):
+        pytest.importorskip("ag_ui_langgraph")
+        import json
+
+        rc = main(["--demo=tools", "-m", "use a tool", "--json"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        data = json.loads(out)
+        assert data["outcome"] == "complete"
+        assert set(data) >= {
+            "text", "outcome", "tool_calls", "extractions", "reasoning", "interrupt", "error",
+        }
+        assert data["tool_calls"] and data["tool_calls"][0]["name"] == "demo_lookup"
+
+    def test_message_interrupt_exits_two(self, capsys):
+        # A HITL turn that pauses -> outcome interrupted -> exit 2 (gh #120), the
+        # 0/1/2 vocabulary --verify / no-spec use. "ask me" is the tools-demo trigger.
+        pytest.importorskip("ag_ui_langgraph")
+        import json
+
+        rc = main(["--demo=tools", "-m", "ask me first", "--json"])
+        data = json.loads(capsys.readouterr().out)
+        assert data["outcome"] == "interrupted"
+        assert rc == 2

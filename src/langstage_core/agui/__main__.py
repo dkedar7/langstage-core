@@ -25,6 +25,67 @@ DEMO_SPEC = DEMO_SPECS["echo"]
 DEMO_NAMES = {"echo": "Demo Agent", "tools": "Tool Demo Agent"}
 
 
+def _exit_code_for(outcome: str) -> int:
+    """The `--message` exit code from the turn outcome (gh #120): complete=0,
+    error=1, interrupted=2 — the same 0/1/2 vocabulary --verify / no-spec use."""
+    return {"complete": 0, "error": 1, "interrupted": 2}.get(outcome, 1)
+
+
+def _run_message(graph: Any, message: str, *, as_json: bool) -> int:
+    """Run ONE turn against ``graph`` with ``message`` and print the reply (gh #120).
+
+    Streams text to stdout over the shipped chunk wire (``iter_chunk_frames``) for the
+    human path; ``--json`` prints the typed ``TurnResult`` for scripting. Exit code
+    mirrors the turn outcome via :func:`_exit_code_for`.
+    """
+    import asyncio
+
+    from . import build_agent, iter_chunk_frames
+    from .collect import collect_chunk_frames
+
+    agent = build_agent(graph)
+
+    if as_json:
+        import json
+
+        result = asyncio.run(collect_chunk_frames(agent, message, "oneshot"))
+        print(json.dumps({
+            "text": result.text,
+            "outcome": result.outcome,
+            "tool_calls": result.tool_calls,
+            "extractions": result.extractions,
+            "reasoning": result.reasoning,
+            "interrupt": result.interrupt,
+            "error": result.error,
+        }))
+        return _exit_code_for(result.outcome)
+
+    outcome = "complete"
+
+    async def _stream() -> None:
+        nonlocal outcome
+        wrote_text = False
+        async for chunk in iter_chunk_frames(agent, message, "oneshot"):
+            status = chunk.get("status")
+            if status == "streaming" and "chunk" in chunk:
+                sys.stdout.write(chunk["chunk"])
+                sys.stdout.flush()
+                wrote_text = True
+            elif status == "interrupt":
+                outcome = "interrupted"
+                info = chunk.get("interrupt", {})
+                reqs = info.get("action_requests") if isinstance(info, dict) else None
+                sys.stderr.write(f"\n[interrupt] agent paused for input: {reqs}\n")
+            elif status == "error":
+                outcome = "error"
+                sys.stderr.write(f"\nerror: {chunk.get('error')}\n")
+        if wrote_text:
+            sys.stdout.write("\n")
+
+    asyncio.run(_stream())
+    return _exit_code_for(outcome)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -69,6 +130,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run one keyless turn against the agent and report whether it works, "
         "then exit (0 ok / 1 failed). The preflight to run right after --agent.",
+    )
+    parser.add_argument(
+        "--message",
+        "-m",
+        dest="message",
+        default=None,
+        help="Run ONE turn against the resolved agent with this prompt, print the "
+        "reply, and exit (0 complete / 1 error / 2 interrupted). The terminal "
+        "smoke-test companion to --verify: --show-config (resolves?) -> --verify "
+        "(runs?) -> --message (what does it say?).",
+    )
+    parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="With --message, print the typed TurnResult as JSON (text, tool_calls, "
+        "extractions, reasoning, outcome, interrupt, error) for scripting.",
     )
     parser.add_argument(
         "--version",
@@ -171,6 +249,14 @@ def main(argv: list[str] | None = None) -> int:
         detail = result.error_message or result.reason
         print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
         return 1
+
+    # --message: the companion to --verify. --verify proves the agent *runs* with a
+    # canned probe whose output is discarded; --message runs the user's OWN prompt and
+    # prints the reply — the terminal smoke-test / quick-chat, with no Python and no
+    # server. A thin wrapper over the shipped chunk wire; exit code mirrors the turn
+    # outcome (complete=0 / error=1 / interrupted=2), consistent with --verify. (gh #120)
+    if args.message is not None:
+        return _run_message(graph, args.message, as_json=args.as_json)
 
     name = args.name or (DEMO_NAMES[args.demo] if args.demo else DEFAULT_AGENT_NAME)
     # cfg.host/cfg.port are the resolved values --show-config prints, so the

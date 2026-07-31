@@ -77,9 +77,14 @@ async def averify(
     """
     result = VerifyResult(ok=False, reason="turn produced no completion frame")
     saw_interrupt = False
+    # Did the turn produce ANY real output — assistant content, a tool call, or
+    # reasoning? A `complete` turn that produced none is the "empty turn" false green
+    # (gh #119); a tool-call-only or reasoning turn is NOT empty (it did work), so it
+    # counts here even with zero content chars.
+    saw_output = False
 
     async def _run() -> None:
-        nonlocal saw_interrupt
+        nonlocal saw_interrupt, saw_output
         # Build INSIDE the guarded run so a bad agent — a wrong-type export (a dict,
         # None, a function), an uncompiled StateGraph, or a spec that won't resolve —
         # becomes a clean ok=False verdict via the except below, instead of an
@@ -96,7 +101,12 @@ async def averify(
             result.frames += 1
             kind = frame.get("type")
             if kind == "content":
-                result.content_chars += len(frame.get("content") or "")
+                n = len(frame.get("content") or "")
+                result.content_chars += n
+                if n:
+                    saw_output = True
+            elif kind in ("tool_start", "reasoning"):
+                saw_output = True
             elif kind == "interrupt":
                 saw_interrupt = True
             elif kind == "error":
@@ -114,21 +124,38 @@ async def averify(
         result.reason = f"{type(exc).__name__}: {exc}"
         return result
 
-    # A clean preflight is a turn that reached a `complete` frame with the
-    # `complete` outcome — no error, and no pending interrupt (a probe never
-    # resumes, so pausing for a decision isn't a clean pass). The outcome comes
-    # from the one shared _terminal_outcome rule the collectors + _produce use
-    # (gh #110), so verify can't drift from them. On the non-interrupt turns a
-    # probe actually produces, `outcome == "complete"` iff `not saw_error`, so
-    # this is identical to the prior `saw_complete and not saw_error`.
+    # The preflight verdict. The outcome comes from the one shared _terminal_outcome
+    # rule the collectors + _produce use (gh #110), so verify can't drift from them —
+    # but verify derives its own pass/fail from it, because "healthy agent" and
+    # "completed cleanly" are not the same question:
+    #   - error         -> fail (an errored turn is never healthy).
+    #   - interrupted   -> PASS. A well-formed HITL pause means the agent ran and
+    #     reached a valid interrupt — the human-in-the-loop feature working, neither an
+    #     error nor an empty turn. Preflighting a HITL agent must not red-fail it (gh
+    #     langstage-jupyter #95). This intentionally supersedes the earlier "an
+    #     interrupt isn't a clean pass" stance (gh #110): the routine showed it broke
+    #     the advertised HITL CI preflight for an entire class of healthy agents.
+    #   - complete + no output -> fail. A turn that loads and completes but produces
+    #     zero content / tool calls / reasoning is the "empty turn" false green the
+    #     README says --verify catches ("a graph that loads but yields an empty ...
+    #     turn") (gh #119).
+    #   - complete + output    -> pass.
     outcome = _terminal_outcome(saw_interrupt=saw_interrupt, saw_error=result.saw_error)
-    result.ok = result.saw_complete and outcome == "complete"
-    if result.ok:
-        result.reason = "one turn completed cleanly"
-    elif result.saw_error:
+    if result.saw_error:
+        result.ok = False
         result.reason = f"agent errored: {result.error_message}"
-    elif saw_interrupt:
-        result.reason = "turn paused on an interrupt (did not complete cleanly)"
+    elif outcome == "interrupted":
+        result.ok = True
+        result.reason = "turn paused cleanly on an interrupt (HITL agent)"
+    elif not result.saw_complete:
+        result.ok = False
+        result.reason = "turn produced no completion frame"
+    elif not saw_output:
+        result.ok = False
+        result.reason = "turn completed but produced no content (0 chars)"
+    else:
+        result.ok = True
+        result.reason = "one turn completed cleanly"
     return result
 
 

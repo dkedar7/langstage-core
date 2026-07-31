@@ -111,6 +111,67 @@ result.outcome       # 'complete'   ('interrupted' on "ask me", 'error' on a fai
 
 `run_turn` accepts a compiled graph **or** a prebuilt `build_agent(...)` and runs the turn under `asyncio.run`; inside an event loop, `await collect_event_frames(agent, message, thread_id, ...)` instead (or `collect_chunk_frames` for the chunk wire). The `complete` / `interrupted` / `error` verdict is the same rule `SessionAdapter` uses, so a one-shot turn and a streamed one agree. (The sibling `langstage` package's `oneturn.py` is a *different* layer — it buffers a `SessionAdapter` for the web one-turn HTTP endpoint; these core helpers are session-free, for tests/evals/scripts.)
 
+### Connect a real model
+
+The demos above are keyless. To stream your own model-backed agent, bring any LangGraph `CompiledGraph` — nothing about the library is demo-specific. The `[real]` extra pulls a lightweight OpenAI-compatible stack:
+
+```bash
+pip install "langstage-core[agui,real]"   # langchain-openai + langgraph
+```
+
+```python
+import asyncio, os
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langstage_core.agui import build_agent, iter_event_frames
+
+# Works with OpenAI, OpenRouter, or any OpenAI-compatible endpoint:
+model = ChatOpenAI(
+    model="gpt-4o-mini",
+    base_url=os.environ.get("OPENAI_BASE_URL"),   # e.g. https://openrouter.ai/api/v1
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+agent = build_agent(create_react_agent(model, tools=[]))
+
+async def main():
+    async for frame in iter_event_frames(agent, "Say hi in one word.", thread_id="s1"):
+        if frame["type"] == "content":
+            print(frame["content"], end="")
+
+asyncio.run(main())
+```
+
+Everything else — `run_turn`, `serve`, the task engine, extractors — takes the same `build_agent(...)` agent, so the keyless snippets above work verbatim against a real model once you swap the graph. (Prefer Anthropic + the full agent stack? `pip install deepagents langchain-anthropic` and build a `deepagents` graph instead; the library only ever sees a `CompiledGraph`.)
+
+### Delegate work to a background task
+
+The task engine is a single-process worker pool: enqueue a prompt, walk away, and read the result off the board when it's done. Any `CompiledGraph` drives the workers.
+
+```python
+import asyncio
+from langstage_core import SessionAdapter, load_agent_spec
+from langstage_core.tasks import TaskRunner, InMemoryTaskStore, TERMINAL_STATES
+
+async def main():
+    adapter = SessionAdapter(graph=load_agent_spec("langstage_core.demo.stub:graph"))
+    runner = TaskRunner(adapter, InMemoryTaskStore(), concurrency=3)
+    await runner.start()
+
+    task_id = await runner.enqueue(title="research", prompt="Summarize the plan.")
+
+    # delegate-and-walk-away: poll the board until the task reaches a terminal state
+    while (task := await runner.store.get(task_id))["state"] not in TERMINAL_STATES:
+        await asyncio.sleep(0.1)
+
+    print(task["state"])    # 'done'
+    print(task["result"])   # the agent's answer
+    await runner.shutdown()
+
+asyncio.run(main())
+```
+
+A `Task` is a `TypedDict` — read it with `task["state"]` / `task["result"]` / `task["error"]` / `task["interrupt"]`, not attribute access. States flow `queued → ongoing → review_needed → done | failed | cancelled`; `TERMINAL_STATES` is the set to stop polling on. `TASK_TOOLS` (with `set_runner` / `get_runner`) are the agent-facing delegation tools, so an agent can enqueue background work to copies of itself.
+
 ### Human-in-the-loop (interrupt → resume)
 
 When the graph calls `interrupt(...)`, you get an `interrupt` frame; resume by passing the decision back via `resume=`:
@@ -150,10 +211,11 @@ Any LangGraph agent can be served over the **[AG-UI protocol](https://github.com
 langstage-agui --agent my_agent.py:graph     # serve over AG-UI at http://localhost:8050
 langstage-agui --demo                          # keyless echo agent, no API key
 langstage-agui --demo=tools                    # keyless rich-frame demo (tools, reasoning, interrupt)
-langstage-agui --agent my_agent.py:graph --verify   # run one keyless turn; exit 0 ok / 1 failed
+langstage-agui --agent my_agent.py:graph --verify        # run one keyless turn; exit 0 ok / 1 failed
+langstage-agui --agent my_agent.py:graph -m "hi there"   # run ONE turn with your prompt, print the reply
 ```
 
-`--verify` is the preflight to run right after wiring up an agent: `--show-config` proves the config chain *resolves* a spec, but `--verify` proves it **loads and actually produces a turn** — catching the two most common failures (a typo'd `module:attr`, or a graph that loads but yields an empty/erroring turn) that otherwise only surface at first chat. Keyless, so it fits a CI/deploy gate.
+`--verify` is the preflight to run right after wiring up an agent: `--show-config` proves the config chain *resolves* a spec, but `--verify` proves it **loads and actually produces a turn** — catching the two most common failures (a typo'd `module:attr`, or a graph that loads but yields an empty/erroring turn) that otherwise only surface at first chat. Keyless, so it fits a CI/deploy gate. `--message`/`-m` is its companion — run one turn with *your* prompt and print the answer (add `--json` for the typed `TurnResult`), exit `0`/`1`/`2` on complete/error/interrupt. The three questions every adopter asks, in order: `--show-config` (resolves?) → `--verify` (runs?) → `--message` (what does it say?).
 
 ```python
 from langstage_core.agui import build_app
