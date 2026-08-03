@@ -811,3 +811,29 @@ async def test_iter_frames_bad_input_yield_clean_error_frame():
     ch = await _collect(iter_chunk_frames({"not": "a graph"}, "hi", "t117badc"))
     assert ch and ch[-1]["status"] == "error"
     assert "TypeError" in ch[-1]["error"]
+
+
+async def test_error_frame_carries_traceback_only_under_debug(monkeypatch):
+    # gh langstage-vscode #83: an agent crash yields the terminal error frame; under
+    # LANGSTAGE_DEBUG it ALSO carries the traceback (WHERE it crashed), off by default.
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    def boom(s):
+        raise RuntimeError("kaboom in my node")
+
+    b = StateGraph(MessagesState)
+    b.add_node("boom", boom)
+    b.add_edge(START, "boom")
+    b.add_edge("boom", END)
+    graph = b.compile()
+
+    monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+    frames = await _collect(iter_event_frames(build_agent(graph), "go", "t83a"))
+    err = [f for f in frames if f.get("type") == "error"][0]
+    assert "traceback" not in err
+    assert err["error"].startswith("RuntimeError")
+
+    monkeypatch.setenv("LANGSTAGE_DEBUG", "1")
+    frames = await _collect(iter_event_frames(build_agent(graph), "go", "t83b"))
+    err = [f for f in frames if f.get("type") == "error"][0]
+    assert "traceback" in err and "boom" in err["traceback"]

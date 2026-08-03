@@ -593,7 +593,7 @@ class TestConfigDict:
         assert port["env"] == "LANGSTAGE_PORT"
         assert port["legacy_env"] == "DEEPAGENT_PORT"
         assert port["toml"] == "server.port"
-        assert d["toml"] == {"found": False, "path": None}
+        assert d["toml"] == {"found": False, "path": None, "unknown_keys": []}
 
     def test_toml_block_reports_found_path(self, isolated_global, tmp_path):
         _toml(tmp_path, "[server]\nport = 8123\n")
@@ -667,3 +667,32 @@ class TestStrictBoolEnv:
     def test_valid_boolean_env_still_resolves(self, isolated_global):
         assert HostConfig.resolve(env={"LANGSTAGE_DEBUG": "true"}, use_toml=False).debug is True
         assert HostConfig.resolve(env={"LANGSTAGE_DEBUG": "off"}, use_toml=False).debug is False
+
+
+class TestSourceProvenanceAndUnknownKeys:
+    """gh langstage #119 (TOML source attribution) + #120 / langstage-vscode #82 (unknown keys)."""
+
+    def test_global_value_attributed_to_the_global_file(self, isolated_global, tmp_path):
+        # gh #119: a value set ONLY in the global config must be attributed to that file,
+        # not blindly to the last (project) file read.
+        (isolated_global / "config.toml").write_text("[server]\nport = 9000\n")
+        _toml(tmp_path, '[ui]\ntitle = "ProjTitle"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 9000
+        assert cfg.sources["port"] == "toml (config.toml)", cfg.sources["port"]
+        assert cfg.sources["title"] == "toml (deepagents.toml)", cfg.sources["title"]
+
+    def test_unknown_toml_keys_reported(self, isolated_global, tmp_path):
+        # gh #120 / vscode #82: typo'd / misplaced keys the layered config silently
+        # ignores are surfaced; valid keys and [configurable] passthroughs are not.
+        _toml(tmp_path, '[ui]\ntitle = "X"\nthemez = "y"\n[bogus]\nz = 1\n[configurable]\nk = "v"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.unknown_toml_keys() == ["bogus.z", "ui.themez"], cfg.unknown_toml_keys()
+        assert "unknown TOML keys" in cfg.describe()
+        assert cfg.config_dict()["toml"]["unknown_keys"] == ["bogus.z", "ui.themez"]
+
+    def test_clean_config_reports_no_unknown_keys(self, isolated_global, tmp_path):
+        _toml(tmp_path, '[agent]\nspec = "x.py:graph"\n[server]\nport = 7000\n')
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.unknown_toml_keys() == []
+        assert "unknown TOML keys" not in cfg.describe()

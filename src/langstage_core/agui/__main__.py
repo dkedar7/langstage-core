@@ -190,7 +190,19 @@ def main(argv: list[str] | None = None) -> int:
         # workspace_root/debug/title rows so --show-config doesn't advertise env
         # vars that have no effect on this surface (same omit_keys treatment the
         # stdio sidecar and JupyterLab launcher already use). (gh #39)
-        described = cfg.describe(omit_keys=["workspace_root", "debug", "title"])
+        omit = ["workspace_root", "debug", "title"]
+        if args.as_json:
+            # --show-config --json emits the machine-readable config_dict (the structured
+            # twin of describe) instead of silently ignoring --json and printing the human
+            # table — so a CI/tooling consumer gets JSON, not scraped brackets. (gh #125)
+            import json
+
+            cd = cfg.config_dict(omit_keys=omit)
+            if args.demo:
+                cd["demo"] = {"agent_spec": DEMO_SPECS[args.demo]}
+            print(json.dumps(cd, default=str))
+            return 0
+        described = cfg.describe(omit_keys=omit)
         if args.demo:
             described += f"\n  demo: agent_spec resolves to {DEMO_SPECS[args.demo]}"
         print(described)
@@ -232,7 +244,12 @@ def main(argv: list[str] | None = None) -> int:
     # ValueError is the malformed-spec ("no :attr suffix") case load_agent_spec raises.
     except (ImportError, AttributeError, OSError, ValueError) as exc:
         print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
-        return 2
+        # A load failure must respect the command's exit-code contract (gh #124):
+        # --verify is 0 ok / 1 failed and --message is 0/1/2 (2 == interrupted), so a
+        # load failure is a "failed"/"error" -> 1 there, never 2 (which --message reads
+        # as interrupted). The serve path keeps 2 — a can't-start usage error, like the
+        # no-spec and missing-[agui] siblings above.
+        return 1 if (args.verify or args.message is not None) else 2
 
     # --verify: the question every adopter asks right after --agent — "did it load
     # AND actually produce a turn?" — which --show-config can't answer (a spec that

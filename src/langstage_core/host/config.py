@@ -263,6 +263,43 @@ def _read_toml(path: Path) -> dict:
         return {}
 
 
+def _load_toml_files(
+    start: Path | None = None,
+) -> tuple[dict, list[Path], list[tuple[Path, dict]]]:
+    """Like :func:`load_toml_config`, but also return the per-file ``(path, data)`` list
+    in precedence order (global then project).
+
+    Keeping each file's own data lets :meth:`HostConfig.resolve` attribute a value to the
+    file it actually won from, instead of blindly to the last file read — a global-config
+    value must not be mislabeled as coming from the project ``langstage.toml`` (gh
+    langstage #119). Each file is read exactly once.
+    """
+    sources: list[Path] = []
+    per_file: list[tuple[Path, dict]] = []
+    merged: dict = {}
+    if _tomllib is None:  # pragma: no cover
+        return merged, sources, per_file
+    gpath = _global_toml_path()
+    if gpath.is_file():
+        data = _read_toml(gpath)
+        merged = _deep_merge(merged, data)
+        if str(gpath) not in _malformed_toml:  # don't list an ignored file as read (#61)
+            sources.append(gpath)
+            per_file.append((gpath, data))
+            if gpath == LEGACY_GLOBAL_TOML:
+                _warn_legacy_toml(gpath, str(GLOBAL_TOML))
+    ppath = _find_project_toml(start)
+    if ppath is not None:
+        data = _read_toml(ppath)
+        merged = _deep_merge(merged, data)
+        if str(ppath) not in _malformed_toml:
+            sources.append(ppath)
+            per_file.append((ppath, data))
+            if ppath.name == LEGACY_PROJECT_TOML:
+                _warn_legacy_toml(ppath, PROJECT_TOML)
+    return merged, sources, per_file
+
+
 def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
     """Load + deep-merge the global and project ``langstage.toml`` files.
 
@@ -274,24 +311,7 @@ def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
     ``(merged_config, sources_used)``; ``({}, [])`` if no TOML reader is
     available (Python 3.10 without ``tomli``).
     """
-    sources: list[Path] = []
-    merged: dict = {}
-    if _tomllib is None:  # pragma: no cover
-        return merged, sources
-    gpath = _global_toml_path()
-    if gpath.is_file():
-        merged = _deep_merge(merged, _read_toml(gpath))
-        if str(gpath) not in _malformed_toml:  # don't list an ignored file as read (#61)
-            sources.append(gpath)
-            if gpath == LEGACY_GLOBAL_TOML:
-                _warn_legacy_toml(gpath, str(GLOBAL_TOML))
-    ppath = _find_project_toml(start)
-    if ppath is not None:
-        merged = _deep_merge(merged, _read_toml(ppath))
-        if str(ppath) not in _malformed_toml:
-            sources.append(ppath)
-            if ppath.name == LEGACY_PROJECT_TOML:
-                _warn_legacy_toml(ppath, PROJECT_TOML)
+    merged, sources, _ = _load_toml_files(start)
     return merged, sources
 
 
@@ -302,6 +322,23 @@ def _get_dotted(data: dict, dotted_key: str) -> Any:
             return None
         node = node[part]
     return node
+
+
+def _flatten_toml_keys(data: dict, prefix: str = "") -> list[str]:
+    """Dotted leaf keys of a parsed TOML dict: ``{"ui": {"theme": "x"}}`` -> ``["ui.theme"]``.
+
+    Used to spot keys present in a config file that map to no config field — i.e. typo'd
+    or misplaced keys the layered config silently ignores (gh langstage #120,
+    langstage-vscode #82).
+    """
+    out: list[str] = []
+    for k, v in data.items():
+        dotted = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.extend(_flatten_toml_keys(v, f"{dotted}."))
+        else:
+            out.append(dotted)
+    return out
 
 
 # ── Config dataclass ─────────────────────────────────────────────────
@@ -351,6 +388,11 @@ class HostConfig:
         "debug": "debug",
         "title": "ui.title",
     }
+    # Top-level TOML tables whose keys are user-defined passthroughs, NOT config fields,
+    # so they must never be flagged as "unknown" (gh langstage #120 / langstage-vscode #82).
+    # ``[configurable]`` is forwarded verbatim to the graph's ``config["configurable"]``.
+    # A subclass with its own passthrough table overrides this (widen the tuple).
+    _TOML_PASSTHROUGH: ClassVar[tuple[str, ...]] = ("configurable",)
 
     # ---- map collection across the subclass MRO ----
 
@@ -400,7 +442,9 @@ class HostConfig:
         """
         overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
         env = os.environ if env is None else env
-        toml_data, toml_paths = (load_toml_config(toml_start) if use_toml else ({}, []))
+        toml_data, toml_paths, toml_files = (
+            _load_toml_files(toml_start) if use_toml else ({}, [], [])
+        )
         env_map = cls._env_map()
         toml_map = cls._toml_map()
 
@@ -428,7 +472,20 @@ class HostConfig:
                         # value as a live TOML setting. (gh langstage-jupyter #78)
                         _warn_malformed_toml_value(tkey, tv, exc, val, toml_paths)
                     else:
-                        src = f"toml ({toml_paths[-1].name})" if toml_paths else "toml"
+                        # Attribute the value to the highest-precedence file that actually
+                        # defines this key, not blindly to the last file read — a global
+                        # (~/.langstage/config.toml) value must not be mislabeled as coming
+                        # from the project langstage.toml (gh langstage #119).
+                        winner = next(
+                            (p for p, d in reversed(toml_files) if _get_dotted(d, tkey) is not None),
+                            None,
+                        )
+                        if winner is not None:
+                            src = f"toml ({winner.name})"
+                        elif toml_paths:
+                            src = f"toml ({toml_paths[-1].name})"
+                        else:
+                            src = "toml"
 
             if name in env_map:
                 var, caster = env_map[name]
@@ -467,6 +524,7 @@ class HostConfig:
         obj = cls(**values)
         obj._sources = sources           # type: ignore[attr-defined]
         obj._toml_paths = toml_paths     # type: ignore[attr-defined]
+        obj._toml_data = toml_data       # type: ignore[attr-defined]  # for unknown_toml_keys()
         return obj
 
     def merge(self, **overrides: Any) -> "HostConfig":
@@ -481,6 +539,28 @@ class HostConfig:
     def sources(self) -> dict[str, str]:
         """Per-field origin from the last ``resolve()`` (field -> source)."""
         return getattr(self, "_sources", {})
+
+    def unknown_toml_keys(self) -> list[str]:
+        """Dotted keys present in the loaded TOML file(s) that map to no config field.
+
+        These are the typo'd / misplaced / unknown keys the layered config **silently
+        ignores** — the single most common config mistake, which ``config`` /
+        ``--show-config`` couldn't surface, so "edit it, then verify" couldn't catch it
+        (gh langstage #120, langstage-vscode #82). Keys under a passthrough table
+        (:attr:`_TOML_PASSTHROUGH`, e.g. ``[configurable]``) are user-defined and never
+        reported. Sorted; empty when the config is clean or no TOML was read.
+        """
+        data = getattr(self, "_toml_data", {}) or {}
+        valid = set(type(self)._toml_map().values())
+        passthrough = type(self)._TOML_PASSTHROUGH
+        unknown = []
+        for dotted in _flatten_toml_keys(data):
+            if dotted in valid:
+                continue
+            if any(dotted == p or dotted.startswith(p + ".") for p in passthrough):
+                continue
+            unknown.append(dotted)
+        return sorted(unknown)
 
     def config_dict(self, omit_keys: list[str] | None = None) -> dict:
         """The resolved config as a machine-readable object — the structured twin of
@@ -527,6 +607,7 @@ class HostConfig:
         toml_block = {
             "found": bool(toml_paths),
             "path": str(toml_paths[-1]) if toml_paths else None,
+            "unknown_keys": self.unknown_toml_keys(),
         }
         return {"config": config, "toml": toml_block}
 
@@ -578,6 +659,14 @@ class HostConfig:
             lines.append("  TOML read from: " + ", ".join(str(p) for p in toml_paths))
         else:
             lines.append("  TOML: no langstage.toml (or legacy deepagents.toml) found")
+        unknown = self.unknown_toml_keys()
+        if unknown:
+            # Surface keys the config silently ignored so a typo/misplacement is visible
+            # on the same verb a user runs to check their config (gh langstage #120,
+            # langstage-vscode #82). ASCII-only (cp1252-safe).
+            lines.append(
+                "  unknown TOML keys (ignored - a typo or wrong table?): " + ", ".join(unknown)
+            )
         if configurable:
             lines.append("")
             lines.append("  LangGraph configurable:")
