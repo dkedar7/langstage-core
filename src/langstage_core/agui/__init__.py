@@ -535,6 +535,23 @@ def _terminal_outcome(*, saw_interrupt: bool, saw_error: bool) -> str:
     return "complete"
 
 
+def _debug_traceback_extra() -> dict:
+    """When ``LANGSTAGE_DEBUG`` is enabled, carry the active exception's traceback in the
+    terminal ``error`` frame so a surface's ``--traceback`` / debug mode can show WHERE the
+    agent crashed, not just ``Type: message`` (gh langstage-vscode #83). Off by default —
+    the frame is byte-identical unless debug is explicitly on, so normal output stays clean.
+    """
+    import os
+
+    if os.getenv("LANGSTAGE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+        import traceback
+
+        tb = traceback.format_exc()
+        if tb and tb.strip() != "NoneType: None":
+            return {"traceback": tb}
+    return {}
+
+
 async def iter_event_frames(
     agent: Any,
     message: str,
@@ -778,7 +795,7 @@ async def iter_event_frames(
         # as the documented terminal `error` frame instead of propagating out of the iterator
         # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
         # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
-        yield {"type": "error", "error": f"{type(exc).__name__}: {exc}"}
+        yield {"type": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
         return
 
     yield {"type": "complete"}
@@ -996,7 +1013,7 @@ async def iter_chunk_frames(
         # as the documented terminal `error` frame instead of propagating out of the iterator
         # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
         # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
-        yield {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+        yield {"status": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
         return
 
     yield {"status": "complete"}

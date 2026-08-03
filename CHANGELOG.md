@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.32] - 2026-08-03
+
+### Fixed
+- **`--show-config` / `config_dict` no longer misattribute a global-config value to the project
+  file (gh langstage #119).** `resolve()` labeled every TOML value with the last file read (the
+  project `langstage.toml`), so a value set only in the global `~/.langstage/config.toml` was
+  reported as coming from `langstage.toml`. Each value is now attributed to the highest-precedence
+  file that actually defines its key. The layered `_load_toml_files` retains per-file data;
+  `load_toml_config`'s public signature is unchanged.
+- **`langstage-agui --show-config --json` now emits JSON instead of silently printing the human
+  table (gh #125).** The `--json` flag was defined but only honored by `--message`; `--show-config`
+  ignored it. It now prints the machine-readable `config_dict` (the structured twin of `describe`),
+  so a tooling consumer gets JSON rather than scraping `[source]` brackets.
+- **A failed agent load respects each command's exit-code contract (gh #124).** The load-failure
+  path always exited `2`, which collided with `--verify` (0 ok / 1 failed) and `--message`
+  (2 = interrupted). A load failure now exits `1` under `--verify`/`--message` (it's a failure/error,
+  not an interrupt) and keeps `2` on the serve path (a can't-start usage error).
+
+### Added
+- **`HostConfig.unknown_toml_keys()` + `--show-config` surfacing of unknown/typo'd TOML keys
+  (support for langstage #120 / langstage-vscode #82).** The layered config silently ignored keys
+  that map to no field — the most common config mistake, which `config`/`--show-config` couldn't
+  catch. `describe()` now lists them and `config_dict()["toml"]["unknown_keys"]` carries them. Keys
+  under a passthrough table (`_TOML_PASSTHROUGH`, default `("configurable",)`) are never flagged;
+  a subclass with its own passthrough table widens the tuple.
+- **The terminal `error` frame optionally carries a `traceback` under `LANGSTAGE_DEBUG` (support
+  for langstage-vscode #83).** A node crash surfaces only `Type: message`; with `LANGSTAGE_DEBUG`
+  enabled, the `error` frame (both wires) also includes the exception traceback so a surface's
+  `--traceback`/debug mode can show *where* the agent crashed. Off by default — the frame is
+  byte-identical unless debug is explicitly on.
+
 ## [1.0.31] - 2026-07-31
 
 ### Fixed

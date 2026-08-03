@@ -225,3 +225,27 @@ class TestMessage:
         data = json.loads(capsys.readouterr().out)
         assert data["outcome"] == "interrupted"
         assert rc == 2
+
+
+class TestShowConfigJsonAndExitCodes:
+    """gh #125 (--show-config --json) + #124 (load-fail exit code respects the command)."""
+
+    def test_show_config_json_emits_config_dict(self, capsys):
+        import json
+
+        rc = main(["--demo=tools", "--show-config", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert "config" in data and "toml" in data
+        assert "unknown_keys" in data["toml"]
+        assert data["demo"]["agent_spec"] == "langstage_core.demo.tools:graph"
+
+    def test_load_failure_exit_code_respects_command(self, capsys):
+        # gh #124: a failed load is "failed"/"error" (exit 1) under --verify / --message,
+        # never 2 (which --message reads as interrupted); the serve path keeps 2.
+        assert main(["--agent", "/nope/x.py:graph", "--verify"]) == 1
+        capsys.readouterr()
+        assert main(["--agent", "/nope/x.py:graph", "-m", "hi"]) == 1
+        capsys.readouterr()
+        assert main(["--agent", "/nope/x.py:graph"]) == 2
+        capsys.readouterr()
