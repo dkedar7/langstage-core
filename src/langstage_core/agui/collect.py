@@ -74,7 +74,14 @@ class TurnResult:
             (carrying ``action_requests`` / ``allowed_decisions`` to build a
             resume decision), else ``None``.
         error: The error message when ``outcome == "error"``, else ``None``.
-        frames: Total frames seen — handy for smoke checks.
+        traceback: The crash traceback when ``outcome == "error"`` **and**
+            ``LANGSTAGE_DEBUG`` is set — showing *where* the agent crashed, not just
+            the one-line message. ``None`` otherwise (no error, or debug off). Sourced
+            from the error frame's ``traceback`` (gh #132; the frame carries it under
+            debug since 1.0.32), so the one-shot path reaches the same "where" the
+            streaming wires do.
+        frames: Total frames seen (an ``int`` count — NOT the list of frame dicts) —
+            handy for smoke checks.
     """
 
     text: str
@@ -84,6 +91,7 @@ class TurnResult:
     reasoning: str = ""
     interrupt: dict | None = None
     error: str | None = None
+    traceback: str | None = None
     frames: int = 0
 
 
@@ -117,6 +125,7 @@ async def collect_event_frames(
     extractions: list[dict] = []
     interrupt: dict | None = None
     error: str | None = None
+    tb: str | None = None
     frames = 0
 
     async for frame in iter_event_frames(
@@ -150,6 +159,7 @@ async def collect_event_frames(
             interrupt = frame
         elif kind == "error":
             error = frame.get("error")
+            tb = frame.get("traceback")  # present under LANGSTAGE_DEBUG (gh #132)
 
     outcome = _terminal_outcome(saw_interrupt=interrupt is not None, saw_error=error is not None)
     return TurnResult(
@@ -162,6 +172,7 @@ async def collect_event_frames(
         # (an interrupt followed by an error is an errored turn, not a paused one).
         interrupt=interrupt if outcome == "interrupted" else None,
         error=error,
+        traceback=tb if outcome == "error" else None,
         frames=frames,
     )
 
@@ -196,6 +207,7 @@ async def collect_chunk_frames(
     extractions: list[dict] = []
     interrupt: dict | None = None
     error: str | None = None
+    tb: str | None = None
     frames = 0
 
     async for chunk in iter_chunk_frames(
@@ -231,6 +243,7 @@ async def collect_chunk_frames(
             interrupt = chunk.get("interrupt", chunk)
         elif status == "error":
             error = chunk.get("error")
+            tb = chunk.get("traceback")  # present under LANGSTAGE_DEBUG (gh #132)
 
     outcome = _terminal_outcome(saw_interrupt=interrupt is not None, saw_error=error is not None)
     return TurnResult(
@@ -241,6 +254,7 @@ async def collect_chunk_frames(
         reasoning="".join(reasoning_parts),
         interrupt=interrupt if outcome == "interrupted" else None,
         error=error,
+        traceback=tb if outcome == "error" else None,
         frames=frames,
     )
 

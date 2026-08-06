@@ -96,7 +96,7 @@ Serve the same demo over AG-UI with `langstage-agui --demo=tools`.
 
 #### One call, one answer (no streaming)
 
-The `iter_*` mappings are streaming generators — perfect for a live UI, but a test, an eval/grading harness, a batch job, or a "run my agent once, give me the answer" script wants a **single call that returns the result**. `run_turn` (sync) / `collect_event_frames` (async) do exactly that, returning a typed `TurnResult` (`text`, `tool_calls`, `extractions`, `reasoning`, `outcome`, `interrupt`, `error`, `frames`) — nothing streamed, nothing hand-accumulated:
+The `iter_*` mappings are streaming generators — perfect for a live UI, but a test, an eval/grading harness, a batch job, or a "run my agent once, give me the answer" script wants a **single call that returns the result**. `run_turn` (sync) / `collect_event_frames` (async) do exactly that, returning a typed `TurnResult` (`text`, `tool_calls`, `extractions`, `reasoning`, `outcome`, `interrupt`, `error`, and `frames` — an `int` frame *count*, not the frame list) — nothing streamed, nothing hand-accumulated:
 
 ```python
 from langstage_core.agui import run_turn

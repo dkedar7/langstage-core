@@ -57,6 +57,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool) -> int:
             "reasoning": result.reasoning,
             "interrupt": result.interrupt,
             "error": result.error,
+            "traceback": result.traceback,  # non-null on error under LANGSTAGE_DEBUG (gh #132)
         }))
         return _exit_code_for(result.outcome)
 
@@ -79,6 +80,11 @@ def _run_message(graph: Any, message: str, *, as_json: bool) -> int:
             elif status == "error":
                 outcome = "error"
                 sys.stderr.write(f"\nerror: {chunk.get('error')}\n")
+                # Under LANGSTAGE_DEBUG the error frame carries the crash traceback
+                # (gh #132) — print it so `--message` shows WHERE, not just the message.
+                tb = chunk.get("traceback")
+                if tb:
+                    sys.stderr.write(tb if tb.endswith("\n") else tb + "\n")
         if wrote_text:
             sys.stdout.write("\n")
 

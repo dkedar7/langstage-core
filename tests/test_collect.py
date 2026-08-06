@@ -214,3 +214,29 @@ def test_collect_chunk_frames_accepts_a_spec_string():
 
     result = asyncio.run(collect_chunk_frames("langstage_core.demo.stub:graph", "hi", "t112c"))
     assert result.outcome == "complete"
+
+
+async def test_collect_captures_traceback_only_under_debug(monkeypatch):
+    # gh #132: TurnResult.traceback carries the crash traceback under LANGSTAGE_DEBUG,
+    # None otherwise — so the one-shot path reaches the same "where" the streaming wires do.
+    from langgraph.graph import END, MessagesState, START, StateGraph
+
+    def boom(s):
+        raise ValueError("node exploded")
+
+    b = StateGraph(MessagesState)
+    b.add_node("boom", boom)
+    b.add_edge(START, "boom")
+    b.add_edge("boom", END)
+    agent = build_agent(b.compile())
+
+    monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+    r = await collect_event_frames(agent, "hi", "tE1")
+    assert r.outcome == "error" and r.traceback is None
+
+    monkeypatch.setenv("LANGSTAGE_DEBUG", "1")
+    r = await collect_event_frames(agent, "hi", "tE2")
+    assert r.outcome == "error" and r.traceback and "boom" in r.traceback
+    # chunk wire has the same field
+    r = await collect_chunk_frames(agent, "hi", "tE3")
+    assert r.outcome == "error" and r.traceback and "boom" in r.traceback
