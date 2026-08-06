@@ -121,6 +121,9 @@ _warned_malformed_toml: set[str] = set()
 _warned_malformed_toml_value: set[tuple[str, str]] = set()
 # Same dedupe for a malformed numeric ENV var (gh #104), keyed on (var, value).
 _warned_malformed_env_value: set[tuple[str, str]] = set()
+# Same dedupe for a value that coerced fine but failed a semantic validator (gh
+# langstage #123: an in-range int that's an out-of-range port), keyed on (field, value).
+_warned_invalid_value: set[tuple[str, str]] = set()
 
 
 def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
@@ -193,6 +196,23 @@ def _env_bool_strict(value: str) -> bool:
     raise ValueError(
         f"unrecognized boolean {value!r}; expected one of {', '.join(_TRUTHY + _FALSY)}"
     )
+
+
+def _port_in_range(value: Any) -> int:
+    """Validate a resolved port is in the bindable range 1-65535, else raise ``ValueError``.
+
+    ``port`` was type-checked (a non-int env degrades to the default + note) but never
+    range-checked, so an in-range *integer* out of the valid *port* range (``70000``)
+    sailed through, was advertised by ``--show-config`` and the startup banner, and then
+    uvicorn silently masked it to 16 bits (``70000 & 0xFFFF == 4464``) — the server bound
+    a *different* port than everything advertised, with no error (gh langstage #123). This
+    raises so ``resolve()``'s validator guard degrades it to the default + a note, exactly
+    like a malformed numeric value.
+    """
+    n = int(value)
+    if not (1 <= n <= 65535):
+        raise ValueError(f"port {n} out of range (must be 1-65535)")
+    return n
 
 
 # ── TOML layer ───────────────────────────────────────────────────────
@@ -393,6 +413,13 @@ class HostConfig:
     # ``[configurable]`` is forwarded verbatim to the graph's ``config["configurable"]``.
     # A subclass with its own passthrough table overrides this (widen the tuple).
     _TOML_PASSTHROUGH: ClassVar[tuple[str, ...]] = ("configurable",)
+    # field -> validator(value) -> value, raising ValueError/TypeError on a value that
+    # coerced to the right TYPE but is semantically invalid (e.g. an out-of-range port).
+    # resolve() degrades a rejected value to the field default + note, like a malformed
+    # numeric value. Merged across the MRO so a subclass can add its own. (gh langstage #123)
+    _VALIDATORS: ClassVar[dict[str, Callable[[Any], Any]]] = {
+        "port": _port_in_range,
+    }
 
     # ---- map collection across the subclass MRO ----
 
@@ -401,6 +428,13 @@ class HostConfig:
         merged: dict[str, tuple[str, Callable[[str], Any]]] = {}
         for klass in reversed(cls.__mro__):
             merged.update(getattr(klass, "_ENV", {}))
+        return merged
+
+    @classmethod
+    def _validators_map(cls) -> dict[str, Callable[[Any], Any]]:
+        merged: dict[str, Callable[[Any], Any]] = {}
+        for klass in reversed(cls.__mro__):
+            merged.update(getattr(klass, "_VALIDATORS", {}))
         return merged
 
     @classmethod
@@ -447,6 +481,7 @@ class HostConfig:
         )
         env_map = cls._env_map()
         toml_map = cls._toml_map()
+        validators = cls._validators_map()
 
         values: dict[str, Any] = {}
         sources: dict[str, str] = {}
@@ -459,6 +494,7 @@ class HostConfig:
             else:
                 val = None
             src = "default"
+            default_val = val  # the built-in default; the degrade target for an invalid resolved value (gh #123)
 
             tkey = toml_map.get(name)
             if tkey is not None:
@@ -517,6 +553,19 @@ class HostConfig:
             if name in overrides:
                 val = overrides[name]
                 src = "override"
+
+            validator = validators.get(name)
+            if validator is not None and val is not None:
+                try:
+                    val = validator(val)
+                except (ValueError, TypeError) as exc:
+                    # Coerced to the right TYPE but semantically invalid (an in-range int
+                    # that's an out-of-range PORT, which uvicorn would silently mask to 16
+                    # bits). Degrade to the default + note — never a silent misbind — and
+                    # reset the source so --show-config can't present the rejected value as
+                    # a live setting (gh langstage #123).
+                    _warn_invalid_value(name, val, exc, default_val)
+                    val, src = default_val, "default"
 
             values[name] = val
             sources[name] = src
@@ -776,6 +825,26 @@ def _warn_malformed_env_value(
     print(
         f"note: ignoring malformed {var}={value!r} "
         f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
+        file=sys.stderr,
+    )
+
+
+def _warn_invalid_value(field: str, value: Any, exc: Exception, default: Any) -> None:
+    """One-line stderr note when a resolved value coerced fine but failed a validator.
+
+    The semantic-validation counterpart of :func:`_warn_malformed_env_value` (gh langstage
+    #123: an out-of-range port). Degrades to the field default (validation runs after all
+    layers, so there's no lower layer to fall back to). ASCII-only so it can't crash a
+    cp1252 Windows console. Deduped so several ``resolve()`` calls in one process don't
+    repeat it.
+    """
+    dedupe = (field, str(value))
+    if dedupe in _warned_invalid_value:
+        return
+    _warned_invalid_value.add(dedupe)
+    print(
+        f"note: ignoring invalid {field}={value!r} "
+        f"({type(exc).__name__}: {exc}); using default {default!r} instead.",
         file=sys.stderr,
     )
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.33] - 2026-08-06
+
+### Fixed
+- **An out-of-range port now degrades to the default with a note instead of a silent misbind
+  (support for langstage #123).** `port` was type-checked but never range-checked, so an in-range
+  *integer* out of the valid *port* range (`70000`) sailed through, was advertised by
+  `--show-config` and the startup banner, and then uvicorn silently masked it to 16 bits
+  (`70000 & 0xFFFF == 4464`) — binding a different port than everything advertised, with no error.
+  A new extensible `_VALIDATORS` map (MRO-merged like `_ENV`/`_TOML`) validates resolved values;
+  `port` degrades an out-of-range value (from env, TOML, or an override) to the default + a
+  `note:`, exactly like a malformed numeric value.
+- **Doc: `iter_chunk_frames`'s docstring no longer names the removed pre-1.0 `stream_graph_updates`
+  helper as the current wire (gh #130).** It described the live chunk wire with a symbol that was
+  removed in 1.0 and isn't importable; the docstring (and the shipped Jupyter example prose) now
+  describe the actual `status`-keyed chunk dicts.
+- **Doc: the README now marks `TurnResult.frames` as an `int` count, not the frame list (gh #131).**
+  Listed among the collected-data fields, `frames` read as "the frames"; it's a count
+  (`for f in result.frames:` crashed).
+
+### Added
+- **`TurnResult.traceback` — the crash traceback on the one-shot path, under `LANGSTAGE_DEBUG`
+  (gh #132).** 1.0.32 put the traceback on the streaming error frame, but the one-shot collectors
+  (`run_turn`/`collect_*`) and `langstage-agui --message` — the funnel adopters actually use —
+  dropped it. `collect_event_frames`/`collect_chunk_frames` now capture it into
+  `TurnResult.traceback` (populated only on an `error` outcome with debug on, `None` otherwise), and
+  `langstage-agui --message` prints it (text mode → stderr; `--json` → a `traceback` field). The
+  one-shot path now reaches the same *where* the streaming wires do.
+
 ## [1.0.32] - 2026-08-03
 
 ### Fixed

@@ -837,3 +837,11 @@ async def test_error_frame_carries_traceback_only_under_debug(monkeypatch):
     frames = await _collect(iter_event_frames(build_agent(graph), "go", "t83b"))
     err = [f for f in frames if f.get("type") == "error"][0]
     assert "traceback" in err and "boom" in err["traceback"]
+
+
+def test_chunk_frames_docstring_drops_removed_symbol():
+    # gh #130: the docstring must not name the removed pre-1.0 `stream_graph_updates`
+    # helper as the current wire (it isn't importable and confuses adopters).
+    from langstage_core.agui import iter_chunk_frames
+
+    assert "stream_graph_updates" not in (iter_chunk_frames.__doc__ or "")

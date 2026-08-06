@@ -696,3 +696,27 @@ class TestSourceProvenanceAndUnknownKeys:
         cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
         assert cfg.unknown_toml_keys() == []
         assert "unknown TOML keys" not in cfg.describe()
+
+
+class TestValidators:
+    """gh langstage #123: a value that coerces to the right TYPE but is semantically
+    invalid (an out-of-range port) degrades to the default + note, never a silent misbind."""
+
+    def test_out_of_range_port_env_degrades(self, isolated_global, tmp_path):
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "70000"}, toml_start=tmp_path)
+        assert cfg.port == 8050
+        assert cfg.sources["port"] == "default"
+
+    def test_out_of_range_port_toml_degrades(self, isolated_global, tmp_path):
+        _toml(tmp_path, "[server]\nport = 99999\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 8050
+        assert cfg.sources["port"] == "default"
+
+    def test_out_of_range_port_override_degrades(self, isolated_global, tmp_path):
+        cfg = HostConfig.resolve(env={}, overrides={"port": 70000}, toml_start=tmp_path)
+        assert cfg.port == 8050
+
+    def test_valid_port_kept(self, isolated_global, tmp_path):
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "9000"}, toml_start=tmp_path)
+        assert cfg.port == 9000 and cfg.sources["port"] == "env:LANGSTAGE_PORT"

@@ -811,14 +811,13 @@ async def iter_chunk_frames(
     extractors: Any = (),
     state: Any = None,
 ):
-    """Drive an ``ag-ui-langgraph`` agent in-process and yield ``stream_graph_updates``
+    """Drive an ``ag-ui-langgraph`` agent in-process and yield ``status``-keyed
     chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result"/"extraction": ...}``,
     ``{"status": "interrupt", ...}``, ``{"status": "complete"}``, ``{"status": "error"}``).
 
-    The chunk-dict counterpart of :func:`iter_event_frames`: the retirement path
-    for surfaces on the ``stream_graph_updates`` wire (the cli and Jupyter render
-    loops). ``resume`` rides ``forwarded_props.command.resume``; ``state`` seeds the
-    graph input (for agents whose input carries more than ``messages``).
+    The chunk-dict counterpart of :func:`iter_event_frames`: the render wire the cli and
+    Jupyter loops consume. ``resume`` rides ``forwarded_props.command.resume``; ``state``
+    seeds the graph input (for agents whose input carries more than ``messages``).
 
     ``max_result_len`` caps each ``tool_result`` chunk exactly as it caps
     :func:`iter_event_frames`' ``tool_end`` frame — same default (500), same
