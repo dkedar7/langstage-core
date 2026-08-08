@@ -249,3 +249,21 @@ class TestShowConfigJsonAndExitCodes:
         capsys.readouterr()
         assert main(["--agent", "/nope/x.py:graph"]) == 2
         capsys.readouterr()
+
+
+def test_missing_agui_extra_exit_code_respects_command(monkeypatch, capsys):
+    # gh #134: a missing [agui] extra is a "can't run" failure — 1 under --verify /
+    # --message (never 2, which --message reads as interrupted), 2 on the serve path,
+    # like the agent-load-failure path (#124).
+    import langstage_core.agui as agui_pkg
+
+    def _raise():
+        raise RuntimeError("AG-UI support needs the 'agui' extra")
+
+    monkeypatch.setattr(agui_pkg, "ensure_available", _raise)
+    assert main(["--demo", "--verify"]) == 1
+    capsys.readouterr()
+    assert main(["--demo", "-m", "hi"]) == 1
+    capsys.readouterr()
+    assert main(["--demo"]) == 2  # serve path keeps the usage/can't-start code
+    capsys.readouterr()

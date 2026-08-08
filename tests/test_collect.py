@@ -240,3 +240,13 @@ async def test_collect_captures_traceback_only_under_debug(monkeypatch):
     # chunk wire has the same field
     r = await collect_chunk_frames(agent, "hi", "tE3")
     assert r.outcome == "error" and r.traceback and "boom" in r.traceback
+
+
+async def test_run_turn_inside_running_loop_raises_actionable_error():
+    # gh #135: run_turn() from inside a running event loop (this test IS in one) raises a
+    # clear error pointing at collect_event_frames, not asyncio.run's opaque RuntimeError
+    # (and no leaked un-awaited coroutine).
+    import pytest
+
+    with pytest.raises(RuntimeError, match="collect_event_frames"):
+        run_turn(load_agent_spec("langstage_core.demo.stub:graph"), "hi")
