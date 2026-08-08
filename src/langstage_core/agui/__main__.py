@@ -233,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
         ensure_available()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
-        return 2
+        # A missing [agui] extra is a "can't run" failure — under --verify (0 ok / 1
+        # failed) and --message (0/1/2, 2=interrupted) it must map to 1, never 2 (which
+        # --message reads as interrupted), exactly like the agent-load-failure path
+        # (gh #124). The serve path keeps 2 (a can't-start usage error). (gh #134)
+        return 1 if (args.verify or args.message is not None) else 2
 
     # Resolve the spec BEFORE announcing success. serve() loads the spec itself, so
     # an unloadable one (typo'd module, missing attribute, nonexistent file — the

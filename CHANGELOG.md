@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.34] - 2026-08-08
+
+### Fixed
+- **A missing `[agui]` extra now maps to each command's exit-code contract (gh #134).** The
+  `ensure_available()` failure path hardcoded exit `2`, so the documented bare-install preflight
+  (`langstage-agui --demo --verify`) returned `2` — outside `--verify`'s `0`/`1` vocabulary and, under
+  `--message`, the code that means *interrupted*. It now returns `1` under `--verify`/`--message`
+  (a can't-run failure) and keeps `2` on the serve path — the same command-aware treatment the
+  agent-load-failure path got in #124.
+- **`run_turn()` raises an actionable error inside a running event loop instead of a raw asyncio
+  internal + a leaked coroutine (gh #135).** Called from a Jupyter cell (or any async context),
+  `run_turn` failed with `RuntimeError: asyncio.run() cannot be called from a running event loop`
+  plus a `coroutine ... was never awaited` warning. It now checks for a running loop up front (before
+  building the coroutine, so nothing leaks) and raises a clear error pointing at the documented
+  alternative: `await collect_event_frames(...)` / `collect_chunk_frames(...)`.
+
 ## [1.0.33] - 2026-08-06
 
 ### Fixed

@@ -285,7 +285,25 @@ def run_turn(
     :func:`collect_event_frames` directly. Resuming across two calls needs the
     *same* agent + ``thread_id`` on both, so pass a prebuilt ``build_agent(...)``
     (a fresh graph gets a fresh in-memory checkpointer each call).
+
+    Raises a clear ``RuntimeError`` if called from inside a running event loop (e.g. a
+    Jupyter cell), instead of ``asyncio.run``'s opaque "cannot be called from a running
+    event loop" + a leaked un-awaited coroutine — pointing at the async alternative
+    (gh #135).
     """
+    # Check for a running loop BEFORE building the coroutine, so the actionable error
+    # replaces asyncio.run's generic one AND nothing is left un-awaited (gh #135).
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass  # no running loop — the normal sync case
+    else:
+        raise RuntimeError(
+            "run_turn() cannot be called from inside a running event loop (e.g. a "
+            "Jupyter cell or other async code). Use "
+            "`await collect_event_frames(agent, message, thread_id, ...)` "
+            "(or collect_chunk_frames) instead."
+        )
     agent = (
         graph_or_agent if _is_langgraph_agent(graph_or_agent) else build_agent(graph_or_agent)
     )
