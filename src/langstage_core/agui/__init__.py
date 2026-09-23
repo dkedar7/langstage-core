@@ -648,6 +648,12 @@ async def iter_event_frames(
         # clean TypeError -> a terminal ``error`` frame via the except below, never a
         # leaked AttributeError.
         agent = agent if hasattr(agent, "run") else build_agent(agent)
+        # Clone per run: a LangGraphAgent keeps per-run state on the instance
+        # (active_run), so two concurrent turns on one shared build_agent() agent —
+        # the README's "build once, reuse per session" pattern — corrupted each other
+        # (TypeError mid-stream). clone() keeps the graph + checkpointer (thread
+        # state) but isolates the run, like build_app / SessionAdapter. (gh #165)
+        agent = agent.clone() if hasattr(agent, "clone") else agent
         async for ev in agent.run(run_input):
             t = type(ev).__name__
             if t == "StepStartedEvent":
@@ -888,6 +894,7 @@ async def iter_chunk_frames(
         # cryptic ``'CompiledStateGraph' object has no attribute 'run'`` error frame; a
         # bad input becomes a clean terminal ``error`` frame via the except below.
         agent = agent if hasattr(agent, "run") else build_agent(agent)
+        agent = agent.clone() if hasattr(agent, "clone") else agent  # per-run isolation (gh #165)
         async for ev in agent.run(run_input):
             t = type(ev).__name__
             if t == "StepStartedEvent":

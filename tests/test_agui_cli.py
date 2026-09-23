@@ -267,3 +267,25 @@ def test_missing_agui_extra_exit_code_respects_command(monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--demo"]) == 2  # serve path keeps the usage/can't-start code
     capsys.readouterr()
+
+
+def test_no_spec_and_usage_errors_exit_code_respects_command(monkeypatch, tmp_path, capsys):
+    # gh #174: with no agent spec resolved, --verify / --message used to exit 2 — outside
+    # --verify's 0/1 and, under --message, the code that means *interrupted*, so a CI gate
+    # following the README passed a completely unconfigured agent as a benign HITL pause
+    # (fail-open). It's a "can't run" failure -> 1 there, like a bad spec (#124) or a
+    # missing extra (#134); the serve path keeps 2 (a can't-start usage error).
+    # The --demo/--agent conflict gets the same command-aware treatment.
+    monkeypatch.chdir(tmp_path)  # no langstage.toml here
+    monkeypatch.delenv("LANGSTAGE_AGENT_SPEC", raising=False)
+    monkeypatch.setenv("LANGSTAGE_CONFIG_HOME", str(tmp_path / "no-global"))
+    assert main(["--verify"]) == 1
+    assert "no agent spec" in capsys.readouterr().err
+    assert main(["-m", "smoke"]) == 1
+    assert "no agent spec" in capsys.readouterr().err
+    assert main([]) == 2  # serve path keeps the usage/can't-start code
+    capsys.readouterr()
+    assert main(["--demo", "--agent", "x.py:g", "--verify"]) == 1
+    capsys.readouterr()
+    assert main(["--demo", "--agent", "x.py:g", "-m", "hi"]) == 1
+    capsys.readouterr()

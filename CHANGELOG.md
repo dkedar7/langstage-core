@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.35] - 2026-09-23
+
+### Fixed
+- **`langstage-agui --verify` / `--message` exit `1`, not `2`, when no agent spec resolves
+  (gh #174).** With no `--agent`, `LANGSTAGE_AGENT_SPEC`, or `[agent].spec`, both commands exited
+  `2` — outside `--verify`'s documented `0`/`1` and, under `--message`, the code that means
+  *interrupted*. A CI/deploy gate following the README therefore passed a completely unconfigured
+  agent as a benign HITL pause (fail-open). The no-spec path (and the `--demo`/`--agent` conflict)
+  now gets the same command-aware mapping as a bad spec (#124) and a missing extra (#134): `1`
+  under `--verify`/`--message`, `2` kept on the serve path.
+- **One `build_agent(...)` agent is now safe to drive from concurrent turns (gh #165).** The
+  README and `examples/fastapi_websocket.py` build one agent and reuse it across sessions, but
+  `iter_event_frames` / `iter_chunk_frames` (and so the collectors, `run_turn`, and `verify`) drove
+  the shared `LangGraphAgent` directly — and it keeps per-run state on the instance (`active_run`).
+  Two interleaved turns crashed the later one mid-stream with `TypeError: 'NoneType' object does
+  not support item assignment` (a lost answer). Both wires now `clone()` the agent per run — the
+  isolation `build_app` and `SessionAdapter` already used; the graph + checkpointer (thread state)
+  are shared as before.
+
 ## [1.0.34] - 2026-08-08
 
 ### Fixed
