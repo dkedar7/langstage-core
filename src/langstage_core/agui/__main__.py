@@ -174,7 +174,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.demo and args.agent:
         print("error: --demo and --agent are mutually exclusive", file=sys.stderr)
-        return 2
+        # Command-aware like every other can't-run path below (gh #174): 2 is
+        # --message's "interrupted" and outside --verify's 0/1, so map it to 1 there.
+        return 1 if (args.verify or args.message is not None) else 2
 
     # CLI flags are overrides on the resolved config so --show-config and the actual
     # bind always agree (and env / langstage.toml host/port/agent work). --agent must
@@ -222,7 +224,11 @@ def main(argv: list[str] | None = None) -> int:
             "or add [agent].spec to langstage.toml",
             file=sys.stderr,
         )
-        return 2
+        # No spec is a "can't run" failure, same as a bad spec (#124) or a missing
+        # extra (#134): 1 under --verify (0/1) and --message (2 == interrupted). A bare
+        # 2 here let a CI gate read an unconfigured agent as a benign HITL pause —
+        # fail-open. The serve path keeps 2 (a can't-start usage error). (gh #174)
+        return 1 if (args.verify or args.message is not None) else 2
 
     from . import DEFAULT_AGENT_NAME, ensure_available, serve
 

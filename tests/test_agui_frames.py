@@ -845,3 +845,49 @@ def test_chunk_frames_docstring_drops_removed_symbol():
     from langstage_core.agui import iter_chunk_frames
 
     assert "stream_graph_updates" not in (iter_chunk_frames.__doc__ or "")
+
+
+def _echo_graph():
+    """The examples/agent.py shape: one node returning a finished AIMessage."""
+    from langchain_core.messages import AIMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    def respond(state):
+        return {"messages": [AIMessage(content=f"You said: {state['messages'][-1].content}")]}
+
+    b = StateGraph(MessagesState)
+    b.add_node("respond", respond)
+    b.add_edge(START, "respond")
+    b.add_edge("respond", END)
+    return b.compile(checkpointer=InMemorySaver())
+
+
+@pytest.mark.parametrize("wire", ["event", "chunk"])
+async def test_shared_agent_is_safe_across_concurrent_turns(wire):
+    # gh #165: the README + examples/fastapi_websocket.py build ONE agent and reuse it
+    # across sessions, but a LangGraphAgent keeps per-run state on the instance
+    # (active_run). Two interleaved turns on it crashed the later one with
+    # "TypeError: 'NoneType' object does not support item assignment" — a lost answer.
+    # The in-process wires now clone() per run, like build_app / SessionAdapter.
+    import asyncio
+
+    agent = build_agent(_echo_graph())
+
+    async def session(sid):
+        out = []
+        for i in range(3):
+            if wire == "event":
+                frames = await _collect(iter_event_frames(agent, f"{sid}{i}", sid))
+                assert not [f for f in frames if f["type"] == "error"], frames
+                out.append("".join(f["content"] for f in frames if f["type"] == "content"))
+            else:
+                frames = await _collect(iter_chunk_frames(agent, f"{sid}{i}", sid))
+                assert not [f for f in frames if f.get("status") == "error"], frames
+                out.append("".join(f.get("chunk", "") for f in frames))
+        return out
+
+    alice, bob, carol = await asyncio.gather(session("alice"), session("bob"), session("carol"))
+    assert alice == [f"You said: alice{i}" for i in range(3)]
+    assert bob == [f"You said: bob{i}" for i in range(3)]
+    assert carol == [f"You said: carol{i}" for i in range(3)]
