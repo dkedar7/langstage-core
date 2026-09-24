@@ -594,7 +594,11 @@ class TestConfigDict:
         assert port["env"] == "LANGSTAGE_PORT"
         assert port["legacy_env"] == "DEEPAGENT_PORT"
         assert port["toml"] == "server.port"
-        assert d["toml"] == {"found": False, "path": None, "unknown_keys": []}
+        assert d["toml"] == {
+            "found": False, "path": None, "paths": [],
+            "malformed": False, "malformed_files": [], "unknown_keys": [],
+        }
+        assert d["issues"] == []
 
     def test_toml_block_reports_found_path(self, isolated_global, tmp_path):
         _toml(tmp_path, "[server]\nport = 8123\n")

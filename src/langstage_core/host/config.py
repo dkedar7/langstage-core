@@ -15,7 +15,10 @@ deprecated fallback: ``DEEPAGENT_*`` env vars, project ``deepagents.toml``,
 global ``~/.deepagents/config.toml``, and ``DEEPAGENTS_CONFIG_HOME``. The
 canonical names win when both are set; using only the legacy env names emits
 a once-per-var ``DeprecationWarning`` *and* a visible one-line stderr notice
-(silence it with ``LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1``). Moving the global config out of
+(silence it with ``LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1``). The ``note:`` is the ONE
+visible signal per legacy name per process: the ``DeprecationWarning`` is attributed
+to langstage-core itself, so Python's default filters hide it and only ``-W`` /
+pytest / strict consumers see it (gh langstage-vscode #112). Moving the global config out of
 ``~/.deepagents/`` also exits the schema collision with LangChain's dcode,
 which owns that directory now.
 
@@ -77,10 +80,17 @@ def _warn_legacy_env(legacy: str, canonical: str) -> None:
     # VS Code output channel).
     if _env_bool(os.getenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE")):
         return
+    # stacklevel=2 attributes the warning to langstage-core's own frame, never to the
+    # user's entry point. An env var has no meaningful user call site, and the old
+    # stacklevel=4 landed on a console script's ``sys.exit(main())`` -- i.e. on
+    # ``__main__``, which Python's DEFAULT filter shows -- so the deprecation was
+    # announced TWICE (this raw warning + the polished note below). Attributed here,
+    # the default filter hides it and the note is the one visible signal; -W / pytest
+    # / strict consumers still get the warning. (gh langstage-vscode #112)
     warnings.warn(
         f"{legacy} is deprecated; use {canonical}.",
         DeprecationWarning,
-        stacklevel=4,
+        stacklevel=2,
     )
     _print_legacy_env_notice(legacy, canonical)
 
@@ -114,6 +124,11 @@ _warned_legacy_toml: set[str] = set()
 # Paths whose TOML parse failed. Callers (loaders, --show-config) consult this so a
 # malformed/ignored file is never listed as "read" (gh langstage-hermes #61).
 _malformed_toml: set[str] = set()
+# path -> "<ExcType>: <message>" for each malformed file, so the config diagnostic can
+# say WHY a present file was rejected, not just that it was (gh #175).
+_malformed_toml_errors: dict[str, str] = {}
+# Dedupe the "misplaced bare key" note (gh #139), keyed on (dotted key, file).
+_warned_misplaced_key: set[tuple[str, str]] = set()
 # Dedupe the "ignoring malformed config" notice — _read_toml is called more than once
 # per path (loader + the per-file source-labeling re-read), which double-warned (#61).
 _warned_malformed_toml: set[str] = set()
@@ -145,10 +160,10 @@ def _warn_legacy_toml(path: Path, canonical_name: str) -> None:
     _warned_legacy_toml.add(key)
     if _env_bool(os.getenv("LANGSTAGE_SUPPRESS_LEGACY_NOTICE")):
         return
-    warnings.warn(
+    warnings.warn(  # stacklevel=2: one visible notice, see _warn_legacy_env (vscode #112)
         f"{path} is deprecated; rename it to {canonical_name}.",
         DeprecationWarning,
-        stacklevel=4,
+        stacklevel=2,
     )
     if "PYTEST_CURRENT_TEST" in os.environ:
         return
@@ -221,7 +236,14 @@ def _port_in_range(value: Any) -> int:
 
 
 def _global_toml_path() -> Path:
-    override = os.getenv("LANGSTAGE_CONFIG_HOME") or os.getenv("DEEPAGENTS_CONFIG_HOME")
+    override = os.getenv("LANGSTAGE_CONFIG_HOME")
+    if not override:
+        override = os.getenv("DEEPAGENTS_CONFIG_HOME")
+        if override:
+            # The legacy config-home redirect is a legacy alias like every DEEPAGENT_*
+            # var, so it gets the same one-time notice instead of being honored
+            # silently (gh #167, langstage-cli #154, langstage #136).
+            _warn_legacy_env("DEEPAGENTS_CONFIG_HOME", "LANGSTAGE_CONFIG_HOME")
     if override:
         return Path(override).expanduser() / "config.toml"
     # New home wins when present; otherwise fall back to the legacy location
@@ -267,6 +289,7 @@ def _read_toml(path: Path) -> dict:
     try:
         data = _tomllib.loads(path.read_text(encoding="utf-8-sig"))
         _malformed_toml.discard(key)  # a file that previously failed now parses
+        _malformed_toml_errors.pop(key, None)
         return data
     except Exception as exc:  # noqa: BLE001 — a broken config must not brick every entrypoint
         # Several surfaces resolve config at import time, so a raw TOMLDecodeError
@@ -275,6 +298,7 @@ def _read_toml(path: Path) -> dict:
         # that needs the config. Skip the bad file, record it as malformed so it isn't
         # later listed as "read", and warn ONCE (ASCII-only, cp1252-safe). (gh #42, #61)
         _malformed_toml.add(key)
+        _malformed_toml_errors[key] = f"{type(exc).__name__}: {exc}"
         if key not in _warned_malformed_toml:
             print(
                 f"note: ignoring malformed config {path} "
@@ -296,30 +320,48 @@ def _load_toml_files(
     value must not be mislabeled as coming from the project ``langstage.toml`` (gh
     langstage #119). Each file is read exactly once.
     """
+    merged, sources, per_file, _ = _load_toml_layers(start)
+    return merged, sources, per_file
+
+
+def _load_toml_layers(
+    start: Path | None = None,
+) -> tuple[dict, list[Path], list[tuple[Path, dict]], list[tuple[Path, str]]]:
+    """:func:`_load_toml_files` plus the files that were found but REJECTED.
+
+    Returns ``(merged, sources, per_file, malformed)`` where ``malformed`` lists each
+    file that exists on the search path but failed to parse, as ``(path, "<ExcType>:
+    <message>")`` in precedence order. It is computed from THIS read (not the
+    process-global ``_malformed_toml`` set), so a stale entry from an unrelated resolve
+    can't leak in — and it is what lets the diagnostic say "found but malformed"
+    instead of "not found" (gh #175).
+    """
     sources: list[Path] = []
     per_file: list[tuple[Path, dict]] = []
+    malformed: list[tuple[Path, str]] = []
     merged: dict = {}
     if _tomllib is None:  # pragma: no cover
-        return merged, sources, per_file
+        return merged, sources, per_file, malformed
+    candidates: list[Path] = []
     gpath = _global_toml_path()
     if gpath.is_file():
-        data = _read_toml(gpath)
-        merged = _deep_merge(merged, data)
-        if str(gpath) not in _malformed_toml:  # don't list an ignored file as read (#61)
-            sources.append(gpath)
-            per_file.append((gpath, data))
-            if gpath == LEGACY_GLOBAL_TOML:
-                _warn_legacy_toml(gpath, str(GLOBAL_TOML))
+        candidates.append(gpath)
     ppath = _find_project_toml(start)
     if ppath is not None:
-        data = _read_toml(ppath)
+        candidates.append(ppath)
+    for path in candidates:
+        data = _read_toml(path)
+        if str(path) in _malformed_toml:  # don't list an ignored file as read (#61)
+            malformed.append((path, _malformed_toml_errors.get(str(path), "unparseable")))
+            continue
         merged = _deep_merge(merged, data)
-        if str(ppath) not in _malformed_toml:
-            sources.append(ppath)
-            per_file.append((ppath, data))
-            if ppath.name == LEGACY_PROJECT_TOML:
-                _warn_legacy_toml(ppath, PROJECT_TOML)
-    return merged, sources, per_file
+        sources.append(path)
+        per_file.append((path, data))
+        if path == LEGACY_GLOBAL_TOML:
+            _warn_legacy_toml(path, str(GLOBAL_TOML))
+        elif path.name == LEGACY_PROJECT_TOML:
+            _warn_legacy_toml(path, PROJECT_TOML)
+    return merged, sources, per_file, malformed
 
 
 def load_toml_config(start: Path | None = None) -> tuple[dict, list[Path]]:
@@ -496,9 +538,13 @@ class HostConfig:
         """
         overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
         env = os.environ if env is None else env
-        toml_data, toml_paths, toml_files = (
-            _load_toml_files(toml_start) if use_toml else ({}, [], [])
+        toml_data, toml_paths, toml_files, toml_malformed = (
+            _load_toml_layers(toml_start) if use_toml else ({}, [], [], [])
         )
+        # Every value this resolve had to drop (malformed / invalid), as data. The stderr
+        # notes are deduped per PROCESS; this list is per RESOLVE, so a surface's
+        # ``--strict`` can fail on it no matter how many resolves ran before. (web #138)
+        value_issues: list[dict] = []
         env_map = cls._env_map()
         toml_map = cls._toml_map()
         validators = cls._validators_map()
@@ -530,6 +576,9 @@ class HostConfig:
                         # source, so --show-config can never present an unusable
                         # value as a live TOML setting. (gh langstage-jupyter #78)
                         _warn_malformed_toml_value(tkey, tv, exc, val, toml_paths)
+                        value_issues.append(_value_issue(
+                            "malformed_value", name, f"toml:{tkey}", tv, exc, val
+                        ))
                     else:
                         # Attribute the value to the highest-precedence file that actually
                         # defines this key, not blindly to the last file read — a global
@@ -574,6 +623,9 @@ class HostConfig:
                         # real source so --show-config never attributes the kept
                         # value to the rejected env var.
                         _warn_malformed_env_value(used, ev, exc, val, src)
+                        value_issues.append(_value_issue(
+                            "malformed_value", name, f"env:{used}", ev, exc, val
+                        ))
 
             if name in overrides:
                 val = overrides[name]
@@ -597,6 +649,9 @@ class HostConfig:
                     # reset the source so --show-config can't present the rejected value as
                     # a live setting (gh langstage #123).
                     _warn_invalid_value(name, val, exc, default_val)
+                    value_issues.append(_value_issue(
+                        "invalid_value", name, src, val, exc, default_val
+                    ))
                     val, src = default_val, "default"
 
             values[name] = val
@@ -607,6 +662,10 @@ class HostConfig:
         obj._toml_paths = toml_paths     # type: ignore[attr-defined]
         obj._toml_data = toml_data       # type: ignore[attr-defined]  # for unknown_toml_keys()
         obj._toml_dirs = toml_dirs       # type: ignore[attr-defined]  # for toml_dir_for()
+        obj._toml_files = toml_files     # type: ignore[attr-defined]  # per-file data, for notes
+        obj._toml_malformed = toml_malformed  # type: ignore[attr-defined]  # found-but-rejected (#175)
+        obj._value_issues = value_issues  # type: ignore[attr-defined]  # for config_issues()
+        obj._note_misplaced_bare_keys()
         return obj
 
     def merge(self, **overrides: Any) -> "HostConfig":
@@ -655,7 +714,119 @@ class HostConfig:
             unknown.append(dotted)
         return sorted(unknown)
 
-    def config_dict(self, omit_keys: list[str] | None = None) -> dict:
+    def _misplaced_bare_keys(self) -> dict[str, str]:
+        """Unknown dotted keys that are really a bare top-level key TOML bound to the
+        preceding ``[table]`` -> the bare key they were meant to be.
+
+        TOML scopes every key after a ``[table]`` header to that table, so ``debug =
+        true`` written below ``[server]`` parses as ``server.debug``. For a field whose
+        TOML key is bare (``debug``), that's the single most natural placement mistake,
+        and it used to be dropped with zero runtime signal (gh #139).
+        """
+        bare = {k for k in type(self)._toml_map().values() if "." not in k}
+        out: dict[str, str] = {}
+        for dotted in self.unknown_toml_keys():
+            leaf = dotted.rsplit(".", 1)[-1]
+            if "." in dotted and leaf in bare:
+                out[dotted] = leaf
+        return out
+
+    def _note_misplaced_bare_keys(self) -> None:
+        """Print the one-line runtime note for each misplaced bare key (gh #139).
+
+        Emitted at resolve time — not only by ``describe()`` — so a user who runs the
+        agent (never ``--show-config``) still learns why ``debug = true`` did nothing.
+        Deduped per (key, file); ASCII-only (cp1252-safe).
+        """
+        files = getattr(self, "_toml_files", [])
+        for dotted, bare in self._misplaced_bare_keys().items():
+            where = next(
+                (p for p, d in reversed(files) if _get_dotted(d, dotted) is not None), None
+            )
+            dedupe = (dotted, str(where))
+            if dedupe in _warned_misplaced_key:
+                continue
+            _warned_misplaced_key.add(dedupe)
+            table = dotted.rsplit(".", 1)[0]
+            print(
+                f"note: ignoring {dotted}{f' in {where}' if where else ''}: '{bare}' is a "
+                f"top-level key, so it must appear before any [table] header (TOML bound "
+                f"it to [{table}]). Move '{bare} = ...' to the top of the file.",
+                file=sys.stderr,
+            )
+
+    def configurable(self) -> dict:
+        """The resolved ``[configurable]`` TOML table (``{}`` when absent or not a table).
+
+        These keys are forwarded to the graph's ``config["configurable"]`` by core's own
+        CLI paths (``langstage-agui`` serve / ``--message``) and are what a surface
+        passes to :meth:`describe` / :meth:`config_dict` as ``configurable=`` so the
+        diagnostic shows them (gh #170). Precedence: the table is the BASE of the
+        graph's configurable; ag-ui-langgraph always sets ``thread_id`` per run, so a
+        ``thread_id`` here is overridden, and a Python caller's own
+        ``build_agent(config=...)`` is used as given (core does not merge TOML into it).
+        """
+        data = getattr(self, "_toml_data", {}) or {}
+        table = data.get("configurable")
+        return dict(table) if isinstance(table, dict) else {}
+
+    def malformed_toml(self) -> list[dict]:
+        """Config files found on the search path but rejected because they don't parse.
+
+        ``[{"path": <abs>, "error": "<ExcType>: <message>"}]`` in precedence order
+        (global, then project); empty when every file parsed. A rejected file
+        contributes NOTHING — every key falls back to env / defaults — so this is the
+        answer to "why is my whole langstage.toml ignored?" (gh #175).
+        """
+        return [
+            {"path": str(p), "error": err}
+            for p, err in getattr(self, "_toml_malformed", [])
+        ]
+
+    def config_issues(self) -> list[dict]:
+        """Everything this resolve had to ignore or degrade, as data — the input a
+        surface's ``--strict`` gate fails on (gh langstage #138).
+
+        Each issue is a dict with ``kind`` and a one-line ``message``, plus:
+
+        - ``malformed_toml`` — ``path``, ``error``: a config file that didn't parse.
+        - ``malformed_value`` — ``field``, ``source`` (``toml:<key>`` / ``env:<VAR>``),
+          ``value``, ``error``, ``used``: a value of the wrong type, degraded.
+        - ``invalid_value`` — same keys: a value that failed a semantic validator
+          (e.g. an out-of-range port), degraded to the default.
+        - ``unknown_toml_key`` — ``key``, ``did_you_mean`` (the bare key a misplaced
+          ``[table].key`` was meant to be, else ``None``): a key no field reads.
+
+        Empty means clean. Unlike the stderr notes (deduped per process), this is
+        computed per ``resolve()``, so it is reliable no matter how many resolves ran.
+        """
+        issues: list[dict] = []
+        for m in self.malformed_toml():
+            issues.append({
+                "kind": "malformed_toml",
+                **m,
+                "message": f"malformed config {m['path']} ignored ({m['error']})",
+            })
+        issues.extend(getattr(self, "_value_issues", []))
+        misplaced = self._misplaced_bare_keys()
+        for key in self.unknown_toml_keys():
+            hint = misplaced.get(key)
+            msg = f"unknown TOML key {key} ignored"
+            if hint:
+                msg += f" ('{hint}' is top-level: move it above every [table] header)"
+            issues.append({
+                "kind": "unknown_toml_key",
+                "key": key,
+                "did_you_mean": hint,
+                "message": msg,
+            })
+        return issues
+
+    def config_dict(
+        self,
+        omit_keys: list[str] | None = None,
+        configurable: dict | None = None,
+    ) -> dict:
         """The resolved config as a machine-readable object — the structured twin of
         :meth:`describe` (gh langstage-jupyter #88 / langstage-vscode #71).
 
@@ -671,10 +842,24 @@ class HostConfig:
         Shape::
 
             {"config": {"<field>": {"value", "source", "env", "legacy_env", "toml"}},
-             "toml": {"found": bool, "path": <abs or None>}}
+             "toml": {"found", "path", "paths", "malformed", "malformed_files",
+                      "unknown_keys"},
+             "issues": [...],                 # config_issues()
+             "configurable": {...}}           # only when configurable= is passed
 
-        A host that tracks more (e.g. langstage-jupyter's malformed-TOML flag, gh #86)
-        extends the ``toml`` block in its own override.
+        ``toml``:
+
+        - ``paths`` — every file that was READ, in precedence order (global, then
+          project); a value's ``source`` names one of these (gh langstage-vscode #107).
+        - ``path`` — the highest-precedence file read (back-compat); when NO file
+          parsed but one was found malformed, the malformed file instead.
+        - ``found`` — a config file exists on the search path (read OR rejected), so a
+          present-but-unparseable file is never reported as absent (gh #175).
+        - ``malformed`` / ``malformed_files`` — whether any file was rejected, and
+          ``[{path, error}]`` for each (:meth:`malformed_toml`).
+
+        ``configurable`` mirrors :meth:`describe`: pass the ``[configurable]`` table the
+        surface actually forwards to the graph (``self.configurable()``) to include it.
         """
         omit = set(omit_keys or ())
         env_map = type(self)._env_map()
@@ -697,12 +882,25 @@ class HostConfig:
                 entry["legacy_env"] = legacy if legacy != canonical else None
             config[f.name] = entry
         toml_paths = getattr(self, "_toml_paths", [])
+        malformed = self.malformed_toml()
+        if toml_paths:
+            path = str(toml_paths[-1])
+        elif malformed:
+            path = malformed[-1]["path"]
+        else:
+            path = None
         toml_block = {
-            "found": bool(toml_paths),
-            "path": str(toml_paths[-1]) if toml_paths else None,
+            "found": bool(toml_paths or malformed),
+            "path": path,
+            "paths": [str(p) for p in toml_paths],
+            "malformed": bool(malformed),
+            "malformed_files": malformed,
             "unknown_keys": self.unknown_toml_keys(),
         }
-        return {"config": config, "toml": toml_block}
+        out = {"config": config, "toml": toml_block, "issues": self.config_issues()}
+        if configurable is not None:
+            out["configurable"] = dict(configurable)
+        return out
 
     def describe(
         self,
@@ -724,6 +922,9 @@ class HostConfig:
         ``--show-config`` and interactive ``/config`` render it identically instead of
         each bolting the table on separately and drifting (the recurring gh #55/#57/
         #61/#64/#66 "config-diagnostic drift" class).
+
+        Print it with :func:`langstage_core.console.safe_print` (not bare ``print``):
+        values are user-controlled and may not encode on a cp1252 console (gh #171).
         """
         omit = set(omit_keys or ())
         env_map = type(self)._env_map()
@@ -747,11 +948,19 @@ class HostConfig:
             hint = f"   ({', '.join(hints)})" if hints else ""
             lines.append(f"  {f.name:<16} = {str(value):<26} [{origin}]{hint}")
         toml_paths = getattr(self, "_toml_paths", [])
+        malformed = self.malformed_toml()
         lines.append("")
         if toml_paths:
             lines.append("  TOML read from: " + ", ".join(str(p) for p in toml_paths))
-        else:
+        elif not malformed:
             lines.append("  TOML: no langstage.toml (or legacy deepagents.toml) found")
+        for m in malformed:
+            # A present-but-unparseable file is NOT "not found": say which file, why, and
+            # that ALL of its keys were dropped (gh #175). ASCII-only (cp1252-safe).
+            lines.append(
+                f"  TOML: {m['path']} is MALFORMED and was ignored entirely "
+                f"({m['error']}); using environment + defaults for its keys"
+            )
         unknown = self.unknown_toml_keys()
         if unknown:
             # Surface keys the config silently ignored so a typo/misplacement is visible
@@ -760,6 +969,11 @@ class HostConfig:
             lines.append(
                 "  unknown TOML keys (ignored - a typo or wrong table?): " + ", ".join(unknown)
             )
+            for dotted, bare in self._misplaced_bare_keys().items():
+                lines.append(
+                    f"    {dotted}: '{bare}' is a top-level key - move it to the top of "
+                    "the file, above every [table] header"
+                )
         if configurable:
             lines.append("")
             lines.append("  LangGraph configurable:")
@@ -769,6 +983,22 @@ class HostConfig:
                     v_str = v_str[:50] + "..."
                 lines.append(f"    {k}: {v_str}")
         return "\n".join(lines)
+
+
+def _value_issue(
+    kind: str, field: str, source: str, value: Any, exc: Exception, used: Any
+) -> dict:
+    """One :meth:`HostConfig.config_issues` entry for a degraded value."""
+    return {
+        "kind": kind,
+        "field": field,
+        "source": source,
+        "value": value,
+        "error": f"{type(exc).__name__}: {exc}",
+        "used": used,
+        "message": f"{kind.replace('_', ' ')} {field}={value!r} from {source} ignored "
+                   f"({type(exc).__name__}: {exc}); using {used!r}",
+    }
 
 
 _NUMERIC_TYPES: dict[str, type] = {"int": int, "float": float}
@@ -837,6 +1067,16 @@ def _numeric_field_type(f: Any) -> type | None:
     return None
 
 
+def _is_bool_field(f: Any) -> bool:
+    """True if the field declares a plain ``bool`` (annotation first, then default)."""
+    ann = getattr(f, "type", None)
+    if ann is bool or ann == "bool":
+        return True
+    if isinstance(ann, (type, str)):  # declared as something else (int, "bool | None", ...)
+        return False
+    return isinstance(getattr(f, "default", None), bool)
+
+
 def _coerce(f: Any, value: Any) -> Any:
     """Coerce a TOML value to the field's declared shape (Path and numeric fields).
 
@@ -857,6 +1097,22 @@ def _coerce(f: Any, value: Any) -> Any:
     """
     if isinstance(getattr(f, "default", None), Path) and not isinstance(value, Path):
         return Path(value)
+
+    if _is_bool_field(f):
+        # The bool sibling of the numeric cast (gh langstage-jupyter #133): a QUOTED
+        # TOML bool (``virtual_mode = "false"``) used to pass through as the str
+        # 'false' -- truthy -- so the setting was silently inverted while
+        # --show-config printed ``false``. Strings go through the same strict caster
+        # the env layer uses (1/true/yes/on, 0/false/no/off; anything else raises ->
+        # resolve() degrades to the default + note). An integer 0/1 is accepted (it
+        # used to work by truthiness); any other type is malformed.
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return _env_bool_strict(value)
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise TypeError(f"expected bool, got {type(value).__name__} {value!r}")
 
     numeric = _numeric_field_type(f)
     if numeric is not None:

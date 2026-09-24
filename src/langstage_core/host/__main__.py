@@ -8,6 +8,7 @@ keys; this covers the shared core.
 """
 import argparse
 
+from ..console import safe_print
 from .config import HostConfig
 
 
@@ -24,7 +25,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the resolved config (the default action - accepted for symmetry with langstage-agui).",
     )
     parser.parse_args(argv)
-    print(HostConfig.resolve().describe())
+    cfg = HostConfig.resolve()
+    # safe_print: config values are user-controlled and may not encode on a cp1252
+    # console (gh #171). The [configurable] table is part of the diagnostic (gh #170).
+    safe_print(cfg.describe(configurable=cfg.configurable()))
     return 0
 
 

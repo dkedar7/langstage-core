@@ -98,9 +98,18 @@ def workspace_root() -> Path:
 
     Prefers the in-process value set by :func:`apply_workspace`; falls back to the
     ``LANGSTAGE_WORKSPACE_ROOT`` / ``DEEPAGENT_WORKSPACE_ROOT`` env (set by a parent
-    process), then to the current working directory.
+    process; a leading ``~`` is expanded, and the legacy name emits the one-time
+    deprecation notice), then to the current working directory.
     """
     if _ACTIVE is not None:
         return _ACTIVE.root.resolve()
-    env = os.environ.get(_ENV_CANONICAL) or os.environ.get(_ENV_LEGACY)
-    return Path(env).resolve() if env else Path.cwd()
+    env = os.environ.get(_ENV_CANONICAL)
+    if not env:
+        env = os.environ.get(_ENV_LEGACY)
+        if env:
+            # Same one-time legacy notice the config layer gives this exact var — the
+            # documented single accessor must not honor it silently (gh #179).
+            from .config import _warn_legacy_env
+
+            _warn_legacy_env(_ENV_LEGACY, _ENV_CANONICAL)
+    return Path(env).expanduser().resolve() if env else Path.cwd()
