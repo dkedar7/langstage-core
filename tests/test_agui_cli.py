@@ -12,6 +12,15 @@ import langstage_core.agui as agui_pkg
 from langstage_core.agui.__main__ import main
 
 
+class _FakeSock:
+    """Stands in for the pre-bound listening socket main() hands serve() (gh #143)."""
+
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
 def test_version_returns_zero_and_prints_pkg(capsys):
     rc = main(["--version"])
     assert rc == 0
@@ -111,6 +120,9 @@ class TestInvalidSpecFailsBeforeBanner:
         calls: list = []
         monkeypatch.setattr(agui_pkg, "ensure_available", lambda: None)
         monkeypatch.setattr(agui_pkg, "serve", lambda graph, **kw: calls.append((graph, kw)))
+        # gh #143: main() binds the port before the banner; hand it a dummy socket so
+        # these tests never touch a real port.
+        monkeypatch.setattr(agui_pkg, "_bind_socket", lambda host, port: _FakeSock())
         return calls
 
     @pytest.mark.parametrize(
@@ -290,3 +302,114 @@ def test_no_spec_and_usage_errors_exit_code_respects_command(monkeypatch, tmp_pa
     capsys.readouterr()
     assert main(["--demo", "--agent", "x.py:g", "-m", "hi"]) == 1
     capsys.readouterr()
+
+class TestNonRunnableAgentUnderMessage:
+    """gh #180: an agent object that LOADS but isn't a runnable graph (forgot
+    ``.compile()``, a factory function, any other attribute) — --verify reported it as a
+    clean one-liner while -m dumped a raw traceback and -m --json printed no JSON."""
+
+    @pytest.fixture
+    def uncompiled(self, tmp_path):
+        pytest.importorskip("ag_ui_langgraph")
+        agent = tmp_path / "uncompiled_agent.py"
+        agent.write_text(
+            "from langgraph.graph import START, END, MessagesState, StateGraph\n"
+            "graph = StateGraph(MessagesState)\n"
+            "graph.add_node('a', lambda s: {'messages': []})\n"
+            "graph.add_edge(START, 'a'); graph.add_edge('a', END)\n"
+        )
+        return f"{agent}:graph"
+
+    def test_message_reports_a_clean_error_like_verify(self, uncompiled, capsys, monkeypatch):
+        monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+        assert main(["--agent", uncompiled, "--verify"]) == 1
+        verify_err = capsys.readouterr().err
+        rc = main(["--agent", uncompiled, "-m", "hi"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "Traceback" not in captured.err
+        assert "error: agent did not complete a turn: TypeError:" in captured.err
+        assert "call .compile() on it first" in captured.err
+        # the very same line --verify prints
+        assert captured.err.strip() == verify_err.strip()
+
+    def test_message_json_emits_a_typed_error_result(self, uncompiled, capsys, monkeypatch):
+        import json
+
+        monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+        rc = main(["--agent", uncompiled, "-m", "hi", "--json"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "Traceback" not in captured.err
+        data = json.loads(captured.out)  # parseable, not empty
+        assert data["outcome"] == "error"
+        assert "call .compile() on it first" in data["error"]
+        assert data["traceback"] is None  # only under LANGSTAGE_DEBUG
+        assert set(data) >= {
+            "text", "outcome", "tool_calls", "extractions", "reasoning", "interrupt", "error",
+        }
+
+    def test_debug_adds_the_traceback(self, uncompiled, capsys, monkeypatch):
+        import json
+
+        monkeypatch.setenv("LANGSTAGE_DEBUG", "1")
+        assert main(["--agent", uncompiled, "-m", "hi", "--json"]) == 1
+        data = json.loads(capsys.readouterr().out)
+        assert "Traceback" in data["traceback"]
+
+
+class TestPortInUseFailsBeforeBanner:
+    """gh #143: a port already in use printed the "Serving … at <url>" success banner to
+    stdout, THEN uvicorn logged the bind error and the process exited 3. Now: bind
+    first, clean one-line stderr, the serve path's can't-start code 2, no banner."""
+
+    def test_busy_port_is_a_clean_error_with_no_banner(self, monkeypatch, capsys):
+        import socket
+
+        served: list = []
+        monkeypatch.setattr(agui_pkg, "ensure_available", lambda: None)
+        monkeypatch.setattr(agui_pkg, "serve", lambda graph, **kw: served.append(kw))
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        port = holder.getsockname()[1]
+        try:
+            rc = main(["--demo", "--host", "127.0.0.1", "--port", str(port)])
+        finally:
+            holder.close()
+        captured = capsys.readouterr()
+        assert rc == 2
+        assert "Serving" not in captured.out, "no false-green banner"
+        assert f"error: cannot serve at http://127.0.0.1:{port}/" in captured.err
+        assert "Traceback" not in captured.err
+        assert served == [], "serve() must not be reached when the bind failed"
+
+    def test_free_port_binds_then_announces_and_serves_on_that_socket(self, monkeypatch, capsys):
+        seen: list = []
+        monkeypatch.setattr(agui_pkg, "ensure_available", lambda: None)
+        monkeypatch.setattr(
+            agui_pkg, "serve", lambda graph, **kw: seen.append((kw["sock"], kw["sock"].getsockname()))
+        )
+        rc = main(["--demo", "--host", "127.0.0.1", "--port", "0"])
+        assert rc == 0
+        assert "Serving" in capsys.readouterr().out
+        sock, name = seen[0]
+        assert name[0] == "127.0.0.1"  # serve() got the socket main() already bound
+        assert sock.fileno() == -1  # ...and main() closed it once serve() returned
+
+    def test_serve_raises_oserror_on_a_busy_port(self):
+        """The library entry point binds first too: a clean OSError instead of
+        uvicorn's log-and-sys.exit(3)."""
+        import socket
+
+        pytest.importorskip("uvicorn")
+        from langstage_core.demo.stub import graph
+
+        holder = socket.socket()
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        try:
+            with pytest.raises(OSError):
+                agui_pkg.serve(graph, host="127.0.0.1", port=holder.getsockname()[1])
+        finally:
+            holder.close()

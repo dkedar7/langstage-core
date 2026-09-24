@@ -42,11 +42,40 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
     """
     import asyncio
 
-    from ..console import safe_write
-    from . import build_agent, iter_chunk_frames
+    from ..console import safe_print, safe_write
+    from . import _debug_traceback_extra, build_agent, iter_chunk_frames
     from .collect import collect_chunk_frames
 
-    agent = build_agent(graph, config=config)
+    try:
+        agent = build_agent(graph, config=config)
+    except Exception as exc:  # noqa: BLE001 - reported as a clean error, like --verify
+        # A spec that LOADS but isn't a runnable graph (an uncompiled StateGraph, a
+        # factory function, any other attribute) makes build_agent raise an actionable
+        # TypeError. --verify already reports it as one clean line; --message used to
+        # dump a raw traceback, and --json printed no JSON at all. Same one-line
+        # `error:` as --verify (exit 1), and a typed error TurnResult under --json so a
+        # script still gets parseable output. The traceback only under LANGSTAGE_DEBUG
+        # (the gh #132 convention). (gh #180)
+        detail = f"{type(exc).__name__}: {exc}"
+        tb = _debug_traceback_extra().get("traceback")
+        if as_json:
+            import json
+
+            safe_print(json.dumps({
+                "text": "",
+                "outcome": "error",
+                "tool_calls": [],
+                "extractions": [],
+                "reasoning": "",
+                "interrupt": None,
+                "error": detail,
+                "traceback": tb,
+            }))
+        else:
+            safe_print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
+            if tb:
+                safe_write(tb if tb.endswith("\n") else tb + "\n", sys.stderr)
+        return _exit_code_for("error")
 
     if as_json:
         import json
@@ -314,12 +343,31 @@ def main(argv: list[str] | None = None) -> int:
         return _run_message(graph, args.message, as_json=args.as_json, config=run_config)
 
     name = args.name or (DEMO_NAMES[args.demo] if args.demo else DEFAULT_AGENT_NAME)
+    url = f"http://{cfg.host}:{cfg.port}{args.path}"
+    # Bind BEFORE the banner. A port already in use used to print the definitive
+    # "Serving … at <url>" success line to stdout and only THEN have uvicorn log the
+    # bind error and exit 3 — the false-green banner #100/#134 removed for the other
+    # can't-serve cases. Now it's the same clean one-line stderr error and the serve
+    # path's documented can't-start code (2), and the banner prints only once the port
+    # is actually held. (gh #143)
+    from . import _bind_socket
+
+    try:
+        sock = _bind_socket(cfg.host, cfg.port)
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        safe_print(f"error: cannot serve at {url}: {reason}", file=sys.stderr)
+        return 2
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
-    safe_print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
+    safe_print(f"Serving {spec!r} over AG-UI at {url}", flush=True)
     # Pass the loaded graph, not the spec: serve() accepts either, and handing it
     # the graph keeps the module from being imported (and its side effects run) twice.
-    serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config)
+    try:
+        serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config,
+              sock=sock)
+    finally:
+        sock.close()
     return 0
 
 

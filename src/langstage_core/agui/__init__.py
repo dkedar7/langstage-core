@@ -319,6 +319,31 @@ def build_app(
     return app
 
 
+def _bind_socket(host: str, port: int) -> Any:
+    """Bind a TCP listening socket on ``(host, port)``, raising ``OSError`` on failure.
+
+    Mirrors uvicorn's own ``Config.bind_socket`` (IPv6 when the host contains ``:``),
+    except that a bind failure RAISES instead of uvicorn's log-and-``sys.exit`` — so a
+    caller can bind first, and only announce "Serving … at <url>" once the port is
+    actually held (gh #143). ``SO_REUSEADDR`` is set off Windows only: there it would
+    let a second server silently share an in-use port instead of failing.
+    """
+    import socket
+    import sys
+
+    family = socket.AF_INET6 if host and ":" in host else socket.AF_INET
+    sock = socket.socket(family=family)
+    try:
+        if sys.platform != "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+    except OSError:
+        sock.close()
+        raise
+    sock.set_inheritable(True)
+    return sock
+
+
 def serve(
     spec_or_graph: Any,
     *,
@@ -328,6 +353,7 @@ def serve(
     name: str = DEFAULT_AGENT_NAME,
     description: str | None = None,
     config: Any = None,
+    sock: Any = None,
 ) -> None:
     """Load an agent (if given a spec string) and serve it over AG-UI.
 
@@ -339,6 +365,12 @@ def serve(
     ``config`` is forwarded to :func:`build_agent` (e.g. ``{"configurable": {...}}``);
     ``langstage-agui`` passes the ``langstage.toml`` ``[configurable]`` table here
     (gh #170).
+
+    The port is bound BEFORE uvicorn starts, so a port already in use raises a clean
+    ``OSError`` here rather than uvicorn logging the bind error and exiting the
+    process with code 3 (gh #143). Pass ``sock`` — an already-bound socket — to serve
+    on it instead (the CLI binds first so its "Serving …" banner is never a false
+    success); ``host`` / ``port`` are then only used for uvicorn's log line.
     """
     if isinstance(spec_or_graph, str):
         from ..host import load_agent_spec  # the host layer feeds AG-UI
@@ -351,7 +383,14 @@ def serve(
         import uvicorn
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(_IMPORT_HINT) from e
-    uvicorn.run(app, host=host, port=port)
+    own_sock = sock is None
+    if own_sock:
+        sock = _bind_socket(host, port)
+    try:
+        uvicorn.Server(uvicorn.Config(app, host=host, port=port)).run(sockets=[sock])
+    finally:
+        if own_sock:
+            sock.close()
 
 
 _DEFAULT_DECISIONS = ["reject", "edit", "respond", "approve"]
@@ -401,11 +440,22 @@ def _normalize_interrupt(payload, default_decisions=_DEFAULT_DECISIONS):
         return action_requests, [], decisions
     if isinstance(payload, dict):
         if "action_requests" in payload:
-            return (
-                payload.get("action_requests", []),
-                payload.get("review_configs", []),
-                payload.get("allowed_decisions", default_decisions),
-            )
+            review_configs = payload.get("review_configs", []) or []
+            decisions = payload.get("allowed_decisions")
+            if decisions is None:
+                # LangChain's HumanInTheLoopMiddleware (and deepagents on it) puts the
+                # permitted verbs on each review_config, not at the top level — derive
+                # the union from there instead of advertising all four (vscode #114).
+                derived: list = []
+                for rc in review_configs:
+                    for d in (rc.get("allowed_decisions") if isinstance(rc, dict) else None) or []:
+                        if d not in derived:
+                            derived.append(d)
+                decisions = (
+                    [d for d in default_decisions if d in derived]
+                    + [d for d in derived if d not in default_decisions]
+                ) or list(default_decisions)
+            return payload.get("action_requests", []), review_configs, decisions
         if payload:  # a plain dict interrupt value -> a single action request
             return [payload], [], list(default_decisions)
         return [], [], list(default_decisions)
@@ -881,9 +931,9 @@ def _unwrap_resume(resume):
     """Return the raw resume payload, accepting either the payload OR a langgraph
     ``Command`` built by :func:`create_resume_input`.
 
-    ``iter_event_frames`` / ``iter_chunk_frames`` wrap ``resume`` into
-    ``forwarded_props.command.resume``, which ag-ui-langgraph turns into
-    ``Command(resume=...)``. But ``create_resume_input()`` *also* returns a
+    ``iter_event_frames`` / ``iter_chunk_frames`` hand ``resume`` to the adapter
+    (``RunAgentInput.resume[]``, or the legacy ``forwarded_props.command.resume`` —
+    see :func:`_resume_input_fields`), which turns it into ``Command(resume=...)``. But ``create_resume_input()`` *also* returns a
     ``Command``, so passing it straight through double-wrapped it — the graph's
     ``interrupt()`` then returned the inner ``Command`` instead of the decision and
     a realistic HITL node crashed with ``'Command' object is not subscriptable``
@@ -898,6 +948,160 @@ def _unwrap_resume(resume):
     except ImportError:  # pragma: no cover - langgraph is always present in practice
         return resume
     return resume.resume if isinstance(resume, Command) else resume
+
+
+async def _pending_interrupts(agent, thread_id) -> list:
+    """The thread's pending LangGraph ``Interrupt`` objects, read from the checkpoint.
+
+    Best-effort, like :func:`_full_text_by_id`: an agent without a ``.graph`` (a test
+    double), a graph without a checkpointer, or any read failure returns ``[]`` and the
+    caller falls back to its pre-existing behavior — never fatal. Collects across ALL
+    tasks (parallel branches can each hold an interrupt), mirroring the adapter.
+    """
+    graph = getattr(agent, "graph", None)
+    aget_state = getattr(graph, "aget_state", None)
+    if aget_state is None:
+        return []
+    try:
+        state = await aget_state({"configurable": {"thread_id": thread_id}})
+    except Exception:  # noqa: BLE001  # pragma: no cover - best-effort, never fatal
+        return []
+    out: list = []
+    for task in getattr(state, "tasks", None) or ():
+        out.extend(getattr(task, "interrupts", None) or ())
+    return out
+
+
+def _supports_agui_resume(agent) -> bool:
+    """True when the installed AG-UI stack honors the standard ``RunAgentInput.resume[]``.
+
+    Needs BOTH halves: the protocol's ``RunAgentInput`` must carry a ``resume`` field
+    (ag-ui-protocol with ``ResumeEntry``) AND the adapter must read it —
+    ``ag-ui-langgraph`` >= 0.0.43 converts it via ``_build_command_from_agui_resume``.
+    An older adapter would silently ignore ``input.resume`` and drop the decision, so
+    it keeps the legacy ``forwarded_props.command.resume`` wire (which it never
+    deprecated). A test double without the hook likewise stays on the legacy wire.
+    """
+    try:
+        from ag_ui.core.types import RunAgentInput
+    except ImportError:  # pragma: no cover - only without the extra
+        return False
+    return "resume" in getattr(RunAgentInput, "model_fields", {}) and callable(
+        getattr(agent, "_build_command_from_agui_resume", None)
+    )
+
+
+async def _resume_input_fields(agent, thread_id, resume) -> dict:
+    """The ``RunAgentInput`` kwargs that carry ``resume`` to the adapter (gh #144).
+
+    Every resume used to ride ``forwarded_props.command.resume``, which
+    ``ag-ui-langgraph`` >= 0.0.43 deprecates — it logs ``forwardedProps.command.resume
+    is deprecated …`` (plus ``failed to parse legacy resume_input as JSON …`` for a
+    plain-string answer) on EVERY documented resume, straight into the surfaces'
+    user-visible output (cli #126/#137, vscode #103), and the legacy reader is slated
+    for removal. On an adapter that supports it, the resume now rides the standard
+    ``RunAgentInput.resume = [ResumeEntry(interrupt_id, "resolved", payload)]`` for the
+    thread's pending interrupt; the adapter turns a single resolved entry into exactly
+    the ``Command(resume=payload)`` the legacy wire built, so the graph sees the same
+    value.
+
+    The public ``resume=`` API is unchanged (raw payload or a ``create_resume_input``
+    ``Command``, gh #82). The legacy wire also JSON-decoded a string payload; that is
+    preserved here (a non-JSON string stays a string) so a ``'{"x": 1}'`` answer still
+    arrives as a dict — just without the warning.
+
+    Falls back to the legacy wire — unchanged behavior — when the stack predates
+    ``resume[]``, or the thread has zero or several pending interrupts (a single
+    ``ResumeEntry`` can only answer one; the adapter's multi-entry form is a sentinel
+    map a plain ``interrupt()`` wouldn't understand).
+    """
+    if resume is None:
+        return {"forwarded_props": {}}
+    if _supports_agui_resume(agent):
+        pending = await _pending_interrupts(agent, thread_id)
+        interrupt_id = getattr(pending[0], "id", None) if len(pending) == 1 else None
+        if interrupt_id:
+            from ag_ui.core.types import ResumeEntry
+
+            payload = resume
+            if isinstance(payload, str):
+                import json
+
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    pass  # a plain-text answer stays a string, as before
+            return {
+                "forwarded_props": {},
+                "resume": [ResumeEntry(interrupt_id=interrupt_id, status="resolved", payload=payload)],
+            }
+    if isinstance(resume, str):
+        import json
+
+        # The legacy reader json.loads() a string payload and logs "failed to parse
+        # resume_input as JSON" for plain text (cli #103/#137). Pre-encode a non-JSON
+        # string so its json.loads() round-trips to the very same string — same value
+        # reaches the graph, no warning. A valid-JSON string is left to decode as before.
+        try:
+            json.loads(resume)
+        except json.JSONDecodeError:
+            resume = json.dumps(resume)
+    return {"forwarded_props": {"command": {"resume": resume}}}
+
+
+def _interrupt_raw_value(ev, pending_by_id):
+    """The ORIGINAL (un-sanitized) value of the interrupt an ``on_interrupt`` event
+    reports, looked up by id in the thread's pending interrupts; ``None`` if unknown.
+
+    ``ag-ui-langgraph`` >= 0.0.43 serializes the event value with ``make_json_safe``,
+    which drops every dict key named ``config`` at any depth — so a standard
+    HumanInterrupt's ``config`` (its ``allow_*`` flags) never reaches us, and
+    ``allowed_decisions`` fell back to all four verbs for every interrupt, even an
+    approve-only one (gh langstage-vscode #114). The checkpoint still holds the real
+    value, so the decision set is derived from it.
+    """
+    raw = getattr(ev, "raw_event", None)
+    iid = raw.get("id") if isinstance(raw, dict) else getattr(raw, "id", None)
+    if iid is None:
+        # Nothing to match on: only safe when exactly one interrupt is pending.
+        if len(pending_by_id) == 1:
+            return next(iter(pending_by_id.values()))
+        return None
+    return pending_by_id.get(iid)
+
+
+async def _decode_interrupt(ev, agent, thread_id, cache: dict):
+    """``(action_requests, review_configs, allowed_decisions)`` for an ``on_interrupt``
+    event — the one decoder both ``iter_*`` wires share.
+
+    ``action_requests`` / ``review_configs`` come from the event's JSON-safe value (what
+    a surface can serialize). ``allowed_decisions`` is re-derived from the checkpoint's
+    original value when available, because the adapter strips a HumanInterrupt's
+    ``config`` from the event (gh langstage-vscode #114). ``cache`` holds the pending
+    interrupts across the run's events so the checkpoint is read once per run.
+    """
+    import json
+
+    payload = getattr(ev, "value", None)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            # A non-JSON string is the canonical `interrupt("Approve X?")` HITL form —
+            # keep it as the string so _normalize_interrupt surfaces it as a single
+            # action request, instead of dropping it to `{}` (which rendered "(no
+            # action details provided)" and asked the human to approve blind). (cli #95)
+            pass
+    action_requests, review_configs, decisions = _normalize_interrupt(payload)
+    if "pending" not in cache:
+        cache["pending"] = {
+            getattr(i, "id", None): getattr(i, "value", None)
+            for i in await _pending_interrupts(agent, thread_id)
+        }
+    raw_value = _interrupt_raw_value(ev, cache["pending"])
+    if raw_value is not None:
+        decisions = _normalize_interrupt(raw_value)[2]
+    return action_requests, review_configs, decisions
 
 
 def _terminal_outcome(*, saw_interrupt: bool, saw_error: bool) -> str:
@@ -992,8 +1196,10 @@ async def iter_event_frames(
     its node finishes, text before its own tool calls (see :class:`_TurnStream`).
 
     ``agent`` is an already-built ``LangGraphAgent`` (see :func:`build_agent`).
-    ``resume`` (a decision answering an interrupt) rides
-    ``forwarded_props.command.resume`` -> LangGraph ``Command(resume=...)``.
+    ``resume`` (a decision answering an interrupt) rides the standard
+    ``RunAgentInput.resume[]`` -> LangGraph ``Command(resume=...)`` (gh #144; the legacy
+    ``forwarded_props.command.resume`` only as a fallback — see
+    :func:`_resume_input_fields`).
 
     ``extractors`` is an optional iterable of :class:`~langstage_core.extractors.base.ToolExtractor`
     (``tool_name`` / ``extracted_type`` / ``extract(content)``). After each tool
@@ -1012,7 +1218,6 @@ async def iter_event_frames(
     import json
     import uuid
 
-    allowed_decisions = ["reject", "edit", "respond", "approve"]
     # Dispatch extractors by tool name. An extractor whose tool_name is the "*"
     # sentinel (GenericToolExtractor) is the fallback, applied to any tool without a
     # dedicated extractor — otherwise "*" is just a dict key no real tool matches, so
@@ -1022,16 +1227,7 @@ async def iter_event_frames(
         (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
     )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
-    forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
-    run_input = RunAgentInput(
-        thread_id=thread_id,
-        run_id=str(uuid.uuid4()),
-        state=dict(state or {}),
-        messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
-        tools=[],
-        context=[],
-        forwarded_props=forwarded_props,
-    )
+    interrupt_cache: dict = {}  # pending interrupts, read once per run (vscode #114)
 
     streamed_text = False
     # Message ids already emitted token-by-token (from TextMessageContentEvent), so
@@ -1074,6 +1270,17 @@ async def iter_event_frames(
         # (TypeError mid-stream). clone() keeps the graph + checkpointer (thread
         # state) but isolates the run, like build_app / SessionAdapter. (gh #165)
         agent = agent.clone() if hasattr(agent, "clone") else agent
+        # Built after the agent: the resume rides RunAgentInput.resume[] keyed by the
+        # thread's pending interrupt id, read from the agent's checkpoint (gh #144).
+        run_input = RunAgentInput(
+            thread_id=thread_id,
+            run_id=str(uuid.uuid4()),
+            state=dict(state or {}),
+            messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
+            tools=[],
+            context=[],
+            **await _resume_input_fields(agent, thread_id, resume),
+        )
         # _TurnStream surfaces finished (non-token-streamed) messages as real AG-UI
         # events at the step that produced them — in message order, before a later
         # node can error — shared with iter_chunk_frames and the served endpoint
@@ -1163,19 +1370,11 @@ async def iter_event_frames(
                             "data": data,
                         }
             elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
-                payload = getattr(ev, "value", None)
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except json.JSONDecodeError:
-                        # A non-JSON string is the canonical `interrupt("Approve X?")`
-                        # HITL form — keep it as the string so _normalize_interrupt
-                        # surfaces it as a single action request, instead of dropping
-                        # it to `{}` (which rendered "(no action details provided)" and
-                        # asked the human to approve blind). (gh langstage-cli #95)
-                        pass
-                action_requests, review_configs, decisions = _normalize_interrupt(
-                    payload, allowed_decisions
+                # Shared decoder: a string payload stays a single action request
+                # (cli #95), the HumanInterrupt list is unwrapped (vscode #40), and
+                # allowed_decisions honors the interrupt's own config (vscode #114).
+                action_requests, review_configs, decisions = await _decode_interrupt(
+                    ev, agent, thread_id, interrupt_cache
                 )
                 saw_interrupt = True
                 yield {
@@ -1272,7 +1471,7 @@ async def iter_chunk_frames(
     ``{"status": "error", "error"}`` (nothing follows an error).
 
     The chunk-dict counterpart of :func:`iter_event_frames`: the render wire the cli and
-    Jupyter loops consume. ``resume`` rides ``forwarded_props.command.resume``; ``state``
+    Jupyter loops consume. ``resume`` rides ``RunAgentInput.resume[]`` (gh #144); ``state``
     seeds the graph input (for agents whose input carries more than ``messages``).
 
     ``max_result_len`` caps each ``tool_result`` chunk exactly as it caps
@@ -1308,16 +1507,7 @@ async def iter_chunk_frames(
         (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
     )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
-    forwarded_props = {"command": {"resume": resume}} if resume is not None else {}
-    run_input = RunAgentInput(
-        thread_id=thread_id,
-        run_id=str(uuid.uuid4()),
-        state=dict(state or {}),
-        messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
-        tools=[],
-        context=[],
-        forwarded_props=forwarded_props,
-    )
+    interrupt_cache: dict = {}  # pending interrupts, read once per run (vscode #114)
 
     streamed_text = False
     # Message ids already streamed token-by-token, so the final snapshot can emit the
@@ -1350,6 +1540,15 @@ async def iter_chunk_frames(
         # bad input becomes a clean terminal ``error`` frame via the except below.
         agent = agent if hasattr(agent, "run") else build_agent(agent)
         agent = agent.clone() if hasattr(agent, "clone") else agent  # per-run isolation (gh #165)
+        run_input = RunAgentInput(
+            thread_id=thread_id,
+            run_id=str(uuid.uuid4()),
+            state=dict(state or {}),
+            messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
+            tools=[],
+            context=[],
+            **await _resume_input_fields(agent, thread_id, resume),  # gh #144
+        )
         # Finished messages surface at the step that produced them (see _TurnStream;
         # gh #140, langstage-cli #119, langstage-vscode #105/#108).
         stream = _TurnStream(agent, run_input)
@@ -1429,19 +1628,13 @@ async def iter_chunk_frames(
                             },
                         }
             elif t == "CustomEvent" and getattr(ev, "name", None) == "on_interrupt":
-                payload = getattr(ev, "value", None)
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except json.JSONDecodeError:
-                        # A non-JSON string is the canonical `interrupt("Approve X?")`
-                        # HITL form — keep it so _normalize_interrupt surfaces it as a
-                        # single action request instead of dropping it to `{}`. (cli #95)
-                        pass
                 # Normalize to a dict with action_requests so a chunk-wire consumer
                 # (cli: interrupt_data.get("action_requests")) doesn't crash on the
-                # standard HumanInterrupt *list* shape and gets a populated request. (#40)
-                action_requests, review_configs, decisions = _normalize_interrupt(payload)
+                # standard HumanInterrupt *list* shape and gets a populated request (#40);
+                # same shared decoder as the event wire (cli #95, vscode #114).
+                action_requests, review_configs, decisions = await _decode_interrupt(
+                    ev, agent, thread_id, interrupt_cache
+                )
                 saw_interrupt = True
                 yield {
                     "status": "interrupt",
