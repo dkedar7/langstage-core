@@ -6,11 +6,12 @@ host (``langstage``, ``langstage-jupyter``, ``langstage-cli``,
 ``langstage-vscode``) needs but used to reimplement.
 """
 from .config import HostConfig, load_toml_config
-from .loader import load_agent_spec
+from .loader import load_agent_spec, parse_agent_spec
 from .workspace import Workspace, apply_workspace, workspace_root
 
 __all__ = [
     "load_agent_spec",
+    "parse_agent_spec",
     "HostConfig",
     "load_toml_config",
     "Workspace",

@@ -255,10 +255,19 @@ def main(argv: list[str] | None = None) -> int:
     from ..host import load_agent_spec
 
     try:
-        graph = load_agent_spec(spec)
-    # ImportError covers ModuleNotFoundError, OSError covers FileNotFoundError, and
-    # ValueError is the malformed-spec ("no :attr suffix") case load_agent_spec raises.
-    except (ImportError, AttributeError, OSError, ValueError) as exc:
+        # --verify / --message print a verdict or reply (--json: a JSON object) on
+        # stdout, so the agent's import-time prints go to stderr there and can't
+        # corrupt what a script captures (gh langstage-cli #136, langstage #140).
+        graph = load_agent_spec(
+            spec,
+            # A dotted `pkg.mod:attr` from langstage.toml imports relative to that file.
+            base_dir=None if args.demo else cfg.toml_dir_for("agent_spec"),
+            stdout_to_stderr=bool(args.verify or args.message is not None),
+        )
+    # ImportError covers ModuleNotFoundError, OSError covers FileNotFoundError,
+    # ValueError is the malformed-spec ("no :attr suffix") case, and TypeError is a
+    # spec that resolved to a str (gh langstage-cli #149).
+    except (ImportError, AttributeError, OSError, ValueError, TypeError) as exc:
         print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
         # A load failure must respect the command's exit-code contract (gh #124):
         # --verify is 0 ok / 1 failed and --message is 0/1/2 (2 == interrupted), so a

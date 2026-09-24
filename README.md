@@ -232,6 +232,16 @@ The same resolution chain everywhere — defaults < `langstage.toml` < `LANGSTAG
 python -m langstage_core.host      # or each surface's --show-config
 ```
 
+### Agent specs and relative paths
+
+A spec is `path/to/file.py:attr` or `package.module:attr`. The `:attr` suffix is **required**: a colon-less spec is an error, never a silent fallback to a default agent. Surrounding whitespace is ignored and a leading `~` is expanded. The attribute must be the agent object itself: a `str` attribute is rejected, not followed as another spec. `load_agent_spec` imports like `python my_agent.py` does:
+
+- **`file.py:attr`** puts the file's own directory first on `sys.path`, so the agent can import its sibling modules (`from tools import ...`).
+- **`package.module:attr`** falls back to the current directory (or `base_dir=`) when the package isn't otherwise importable. That covers a project-local package run from a console script.
+- `load_agent_spec(spec, stdout_to_stderr=True)` sends the agent's import-time `print`s to stderr. Use it on machine-readable paths. `langstage-agui --verify` / `-m` / `--json` already do.
+
+**Relative paths in a TOML file resolve against that file's directory**, like paths in `pyproject.toml`. This applies to `[agent] spec` (file form) and `[workspace] root`, for both the project `langstage.toml` (found by walking up from the cwd) and the global `~/.langstage/config.toml`. A project therefore runs the same from its root and from any subdirectory. In the **global** file, relative paths resolve against `~/.langstage/`, so write `~/agents/my_agent.py:graph` or an absolute path there. Values from `LANGSTAGE_*` env vars and CLI flags stay relative to the cwd. For a dotted spec from TOML, `cfg.toml_dir_for("agent_spec")` gives you the file's directory to pass as `base_dir=`.
+
 ## Migrating from langgraph-stream-parser
 
 `langstage-core` **1.0** is the rename of `langgraph-stream-parser`. The old import name keeps working **through a separate compat package** — `langgraph-stream-parser` 1.0, which now just re-exports `langstage_core` (with a `DeprecationWarning`). So `import langgraph_stream_parser` and its submodules keep resolving **only while that package remains installed**:
