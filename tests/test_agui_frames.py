@@ -22,18 +22,18 @@ async def _collect(aiter):
 async def test_iter_chunk_frames_shape():
     agent = build_agent(load_agent_spec("langstage_core.demo.stub:graph"))
     frames = await _collect(iter_chunk_frames(agent, "chunk wire", "t1"))
-    assert frames[-1] == {"status": "complete"}
+    assert frames[-1] == {"status": "complete", "outcome": "complete"}
     content = [f for f in frames if f.get("status") == "streaming" and "chunk" in f]
-    assert content and all(set(f) == {"status", "chunk", "node"} for f in content)
+    assert content and all(set(f) == {"status", "chunk", "node", "message_id"} for f in content)
     assert "chunk wire" in "".join(f["chunk"] for f in content)
 
 
 async def test_iter_event_frames_shape():
     agent = build_agent(load_agent_spec("langstage_core.demo.stub:graph"))
     frames = await _collect(iter_event_frames(agent, "event wire", "t2"))
-    assert frames[-1] == {"type": "complete"}
+    assert frames[-1] == {"type": "complete", "outcome": "complete"}
     content = [f for f in frames if f.get("type") == "content"]
-    assert content and all(set(f) == {"type", "content", "role", "node"} for f in content)
+    assert content and all(set(f) == {"type", "content", "role", "node", "message_id"} for f in content)
     assert "event wire" in "".join(f["content"] for f in content)
 
 
@@ -413,7 +413,7 @@ async def test_iter_chunk_frames_runs_extractors():
     assert extraction[0]["extracted_type"] == "tool_call"
     assert extraction[0]["data"] == {"content": "custom-tool-output"}
     # The extraction chunk rides the normal stream — it must still terminate cleanly.
-    assert frames[-1] == {"status": "complete"}
+    assert frames[-1] == {"status": "complete", "outcome": "complete"}
 
 
 async def test_iter_chunk_frames_specific_extractor_wins_over_generic_fallback():
@@ -792,11 +792,11 @@ async def test_iter_frames_accept_a_bare_compiled_graph():
     # build_agent) used to yield a single error frame carrying a leaked
     # `'CompiledStateGraph' object has no attribute 'run'` AttributeError.
     ev = await _collect(iter_event_frames(_two_node_graph(), "hi", "t117e"))
-    assert ev[-1] == {"type": "complete"}
+    assert ev[-1] == {"type": "complete", "outcome": "complete"}
     assert not any(f.get("type") == "error" for f in ev), ev
     assert "from first." in "".join(f.get("content", "") for f in ev if f.get("type") == "content")
     ch = await _collect(iter_chunk_frames(_two_node_graph(), "hi", "t117c"))
-    assert ch[-1] == {"status": "complete"}
+    assert ch[-1] == {"status": "complete", "outcome": "complete"}
     assert not any(f.get("status") == "error" for f in ch), ch
 
 

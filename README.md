@@ -60,9 +60,26 @@ asyncio.run(main())
 ```
 
 - **`iter_event_frames`** yields rich, typed frames — `content`, `tool_start`, `tool_end`, `reasoning`, `interrupt`, `extraction`, `complete`, `error` — used by the web and VS Code surfaces.
-- **`iter_chunk_frames`** yields terminal-friendly chunk dicts — `{"status": "streaming", "chunk": "..."}` … `{"status": "complete"}` — used by the CLI and Jupyter surfaces.
+- **`iter_chunk_frames`** yields terminal-friendly `status`-keyed chunk dicts — used by the CLI and Jupyter surfaces. A `streaming` chunk carries exactly **one** payload key (`chunk`, `reasoning`, `tool_calls`, `tool_result`, or `extraction`), so branch on the key rather than assuming `chunk`.
 
-`build_agent` attaches an in-memory checkpointer if the graph has none, so multi-turn memory and interrupts work out of the box; pass a `thread_id` per turn to key per-conversation state.
+`build_agent` attaches an in-memory checkpointer if the graph has none (on a copy — your graph object is never mutated), so multi-turn memory and interrupts work out of the box: build the agent once, reuse it, and pass a `thread_id` per turn to key per-conversation state.
+
+#### Frame reference
+
+Both wires carry the same information; the table is the contract (keys marked *new* are additive and safe to ignore).
+
+| Event wire (`iter_event_frames`) | Chunk wire (`iter_chunk_frames`) | Meaning |
+|---|---|---|
+| `{"type": "content", "content", "role", "node", "message_id"}` | `{"status": "streaming", "chunk", "node", "message_id"}` | Assistant text delta. `message_id` (*new*) is the AIMessage it belongs to: a change of id between two text frames is a **message boundary** (e.g. two nodes' replies) — join with a paragraph break, not inline. |
+| `{"type": "reasoning", "content", "node"}` | `{"status": "streaming", "reasoning", "node"}` | Reasoning-model chain-of-thought, separate from the answer. |
+| `{"type": "tool_start", "id", "name", "args", "node"}` | `{"status": "streaming", "tool_calls": [{"name", "args", "id"}]}` | A tool call (chunk `id` is *new*). |
+| `{"type": "tool_end", "id", "name", "result", "status", "error_message", "duration_ms"}` | `{"status": "streaming", "tool_result", "id", "name", "tool_status", "duration_ms"}` | A tool result (capped at `max_result_len`). `status` / `tool_status` is `"success"` or `"error"`; `duration_ms` is the tool's run time, or `None` when the tool ran outside LangChain's tool runtime (e.g. a hand-written node). Chunk `id` / `name` / `tool_status` / `duration_ms` are *new*; `tool_result` is still the result string. |
+| `{"type": "extraction", "tool_name", "extracted_type", "data"}` | `{"status": "streaming", "extraction": {"tool_name", "extracted_type", "data"}}` | An extractor's output for a **successful** tool result (never emitted for a failed tool). |
+| `{"type": "interrupt", "action_requests", "review_configs", "allowed_decisions"}` | `{"status": "interrupt", "interrupt": {...same keys}}` | A HITL pause; resume with `resume=`. |
+| `{"type": "complete", "outcome"}` | `{"status": "complete", "outcome"}` | Terminal. `outcome` (*new*) is `"interrupted"` if the turn paused on an interrupt, else `"complete"`. |
+| `{"type": "error", "error"}` | `{"status": "error", "error"}` | Terminal — nothing follows it (no `complete`). Content earlier nodes already produced is emitted before it. |
+
+Frames arrive in message order: a node that returns a *finished* `AIMessage` (no token streaming — `model.invoke()`, a router, a canned reply) is emitted when that node finishes, its text before its own tool calls, and the served AG-UI endpoint (`build_app` / `serve`) streams the same `TEXT_MESSAGE_*` / `TOOL_CALL_*` events the in-process wires are built from.
 
 #### See every frame type, keyless
 
@@ -83,7 +100,7 @@ async def main():
 
     # "ask me" raises interrupt(...); resume the same thread with a decision.
     async for frame in iter_event_frames(agent, "ask me", "s2"):
-        print(frame["type"])                       # ... interrupt
+        print(frame["type"])                       # ... interrupt, complete (outcome="interrupted")
     async for frame in iter_event_frames(agent, "", "s2",
                                          resume=create_resume_input(decisions=[{"type": "approve"}])):
         print(frame["type"])                       # content, complete
@@ -109,7 +126,7 @@ result.extractions   # [{'tool_name': 'demo_lookup', 'extracted_type': 'demo_fac
 result.outcome       # 'complete'   ('interrupted' on "ask me", 'error' on a failing turn)
 ```
 
-`run_turn` accepts a compiled graph **or** a prebuilt `build_agent(...)` and runs the turn under `asyncio.run`; inside an event loop, `await collect_event_frames(agent, message, thread_id, ...)` instead (or `collect_chunk_frames` for the chunk wire). The `complete` / `interrupted` / `error` verdict is the same rule `SessionAdapter` uses, so a one-shot turn and a streamed one agree. (The sibling `langstage` package's `oneturn.py` is a *different* layer — it buffers a `SessionAdapter` for the web one-turn HTTP endpoint; these core helpers are session-free, for tests/evals/scripts.)
+`run_turn` accepts a compiled graph **or** a prebuilt `build_agent(...)` and runs the turn under `asyncio.run`. Each call is an isolated one-shot by default — a fresh `thread_id` per call, and the graph you pass is not mutated — so `for prompt in dataset: run_turn(graph, prompt)` never leaks one turn into the next; to carry state across calls (or resume an interrupt), pass the same `build_agent(...)` agent and an explicit `thread_id` each time; inside an event loop, `await collect_event_frames(agent, message, thread_id, ...)` instead (or `collect_chunk_frames` for the chunk wire). The `complete` / `interrupted` / `error` verdict is the same rule `SessionAdapter` uses, so a one-shot turn and a streamed one agree. (The sibling `langstage` package's `oneturn.py` is a *different* layer — it buffers a `SessionAdapter` for the web one-turn HTTP endpoint; these core helpers are session-free, for tests/evals/scripts.)
 
 ### Connect a real model
 

@@ -39,6 +39,7 @@ Reach for these in tests/evals/scripts; the web endpoint keeps using its own.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,15 +65,16 @@ class TurnResult:
         text: The concatenated ``content`` deltas — the agent's answer.
         outcome: ``"complete"`` | ``"interrupted"`` | ``"error"`` — the shared
             :func:`~langstage_core.agui._terminal_outcome` verdict.
-        tool_calls: One ``{"name", "args", "id"}`` per tool the turn called (the
-            chunk wire carries no ``id``, so it is ``None`` there).
+        tool_calls: One ``{"name", "args", "id"}`` per tool the turn called — the
+            same ids on both collectors (the chunk wire carries the call ``id`` since
+            gh #149).
         extractions: One ``{"tool_name", "extracted_type", "data"}`` per
             ``extraction`` frame (empty unless ``extractors=`` was passed).
         reasoning: The concatenated ``reasoning`` deltas (reasoning-model
             chain-of-thought), kept separate from ``text``.
-        interrupt: The interrupt frame when ``outcome == "interrupted"``
-            (carrying ``action_requests`` / ``allowed_decisions`` to build a
-            resume decision), else ``None``.
+        interrupt: The interrupt payload when ``outcome == "interrupted"`` —
+            ``{"action_requests", "review_configs", "allowed_decisions"}``, identical
+            across both collectors (no frame ``type`` key, gh #154) — else ``None``.
         error: The error message when ``outcome == "error"``, else ``None``.
         traceback: The crash traceback when ``outcome == "error"`` **and**
             ``LANGSTAGE_DEBUG`` is set — showing *where* the agent crashed, not just
@@ -156,7 +158,12 @@ async def collect_event_frames(
                 }
             )
         elif kind == "interrupt":
-            interrupt = frame
+            # The interrupt DATA, without the event wire's frame discriminator: the
+            # chunk collector stores the inner dict (no `type` key), so storing the
+            # whole frame here made `TurnResult.interrupt` differ across the two
+            # collectors for the same turn (gh #154). `Session.interrupt` is a
+            # separate, documented contract and keeps the full frame.
+            interrupt = {k: v for k, v in frame.items() if k != "type"}
         elif kind == "error":
             error = frame.get("error")
             tb = frame.get("traceback")  # present under LANGSTAGE_DEBUG (gh #132)
@@ -193,11 +200,9 @@ async def collect_chunk_frames(
     parity. Same kwargs, same :class:`TurnResult` shape, same shared
     :func:`~langstage_core.agui._terminal_outcome` verdict — only the frame
     vocabulary differs (``{"status": "streaming", "chunk"/"reasoning"/"tool_calls"/
-    "extraction": ...}``, ``{"status": "interrupt"/"error"/"complete"}``). The
-    chunk wire's ``tool_calls`` carry no ``id``, so ``TurnResult.tool_calls[*]["id"]``
-    is ``None`` here; ``TurnResult.interrupt`` is the inner interrupt dict, whose
-    ``action_requests`` / ``allowed_decisions`` keys match the event wire's, so
-    ``result.interrupt["action_requests"]`` reads the same across both collectors.
+    "extraction": ...}``, ``{"status": "interrupt"/"error"/"complete"}``). For the
+    same turn both collectors return equal ``tool_calls`` (ids included, gh #149)
+    and an equal ``interrupt`` dict (gh #154).
     """
     agent = agent if _is_langgraph_agent(agent) else build_agent(agent)
 
@@ -263,7 +268,7 @@ def run_turn(
     graph_or_agent: Any,
     message: str,
     *,
-    thread_id: str = "oneshot",
+    thread_id: str | None = None,
     **kwargs: Any,
 ) -> TurnResult:
     """Synchronous "one call, one answer" convenience over :func:`collect_event_frames`.
@@ -279,12 +284,20 @@ def run_turn(
         assert r.outcome == "complete"
         assert r.tool_calls[0]["name"] == "demo_lookup"
 
-    ``thread_id`` defaults to ``"oneshot"``; extra kwargs (``extractors``,
-    ``max_result_len``, ``resume``, ``state``) are forwarded to
-    :func:`collect_event_frames`. For a caller already inside an event loop, await
-    :func:`collect_event_frames` directly. Resuming across two calls needs the
-    *same* agent + ``thread_id`` on both, so pass a prebuilt ``build_agent(...)``
-    (a fresh graph gets a fresh in-memory checkpointer each call).
+    Each call is an **isolated** one-shot by default: ``thread_id`` defaults to a fresh
+    id per call, and a bare graph is wrapped without mutating it (gh #163) — so
+    ``for prompt in dataset: run_turn(graph, prompt)`` never leaks one turn's
+    conversation into the next. Extra kwargs (``extractors``, ``max_result_len``,
+    ``resume``, ``state``) are forwarded to :func:`collect_event_frames`. For a caller
+    already inside an event loop, await :func:`collect_event_frames` directly.
+
+    To carry state across calls (multi-turn, or resuming an interrupt), pass the
+    *same* prebuilt ``build_agent(...)`` **and** an explicit, shared ``thread_id`` on
+    each call (or a graph compiled with your own checkpointer)::
+
+        agent = build_agent(graph)
+        r = run_turn(agent, "ask me", thread_id="t1")          # outcome == "interrupted"
+        run_turn(agent, "", thread_id="t1", resume={"decisions": [...]})
 
     Raises a clear ``RuntimeError`` if called from inside a running event loop (e.g. a
     Jupyter cell), instead of ``asyncio.run``'s opaque "cannot be called from a running
@@ -307,4 +320,6 @@ def run_turn(
     agent = (
         graph_or_agent if _is_langgraph_agent(graph_or_agent) else build_agent(graph_or_agent)
     )
+    if thread_id is None:
+        thread_id = f"oneshot-{uuid.uuid4().hex}"
     return asyncio.run(collect_event_frames(agent, message, thread_id, **kwargs))
