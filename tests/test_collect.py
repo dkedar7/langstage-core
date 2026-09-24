@@ -137,7 +137,7 @@ async def test_collect_event_frames_interrupt_turn():
     r = await collect_event_frames(agent, "ask me", "s-int")
     assert r.outcome == "interrupted"
     assert r.interrupt is not None
-    assert r.interrupt["type"] == "interrupt"
+    assert "type" not in r.interrupt  # the payload, not the frame (gh #154)
     assert r.interrupt["action_requests"]  # a populated action request to resume with
     assert r.error is None
 

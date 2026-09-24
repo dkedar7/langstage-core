@@ -75,6 +75,75 @@ def _is_langgraph_agent(obj: Any) -> bool:
     return hasattr(obj, "clone") and hasattr(obj, "run") and hasattr(obj, "name")
 
 
+def _schema_keys_without_pydantic(graph: Any, constant_keys: list) -> dict:
+    """Schema keys read straight off the graph's state classes (their annotations),
+    for when ag-ui's pydantic JSON-schema introspection can't build a schema.
+
+    The case that motivates it (gh langstage#166): a state declared with the stdlib
+    ``typing.TypedDict`` on Python < 3.12. LangGraph runs it fine, but
+    ``graph.get_input_jsonschema()`` goes through ``pydantic.TypeAdapter``, which raises
+    ``PydanticUserError`` ("use typing_extensions.TypedDict") — a ``RuntimeError``
+    subclass that ag-ui-langgraph's ``get_schema_keys`` fallback doesn't catch, so
+    EVERY turn errored before the graph ran. A TypedDict's keys are simply its
+    annotations, so read them directly.
+    """
+    builder = getattr(graph, "builder", None)
+
+    def keys(attr: str) -> list:
+        schema = getattr(builder, attr, None) or getattr(builder, "state_schema", None)
+        try:
+            names = list(getattr(schema, "__annotations__", {}) or {})
+        except Exception:  # pragma: no cover - defensive
+            names = []
+        return [*names, *[k for k in constant_keys if k not in names]]
+
+    try:
+        config_schema = graph.get_config_jsonschema()
+        config_keys = list(config_schema.get("properties", {}))
+    except Exception:  # noqa: BLE001 - the config schema is optional here
+        config_keys = []
+    return {
+        "input": keys("input_schema"),
+        "output": keys("output_schema"),
+        "config": config_keys,
+        "context": [],
+    }
+
+
+_AGENT_CLASSES: dict = {}
+
+
+def _agent_class(base: Any) -> Any:
+    """The ``LangGraphAgent`` subclass :func:`build_agent` instantiates (cached per base).
+
+    Its one override degrades ag-ui's schema introspection instead of failing the turn
+    when pydantic can't build a JSON schema for the graph's state (e.g. a stdlib
+    ``typing.TypedDict`` on Python 3.11, gh langstage#166). ``clone()`` rebuilds via
+    ``type(self)``, so every per-run clone keeps the override.
+    """
+    cls = _AGENT_CLASSES.get(base)
+    if cls is None:
+
+        class LangStageGraphAgent(base):  # type: ignore[misc, valid-type]
+            def get_schema_keys(self, config):
+                try:
+                    return super().get_schema_keys(config)
+                except Exception as exc:
+                    try:
+                        from pydantic.errors import PydanticErrorMixin
+                    except ImportError:  # pragma: no cover - pydantic is always present
+                        raise exc from None
+                    if not isinstance(exc, PydanticErrorMixin):
+                        raise
+                    return _schema_keys_without_pydantic(
+                        self.graph, list(getattr(self, "constant_schema_keys", ["messages", "tools"]))
+                    )
+
+        LangStageGraphAgent.__qualname__ = LangStageGraphAgent.__name__
+        cls = _AGENT_CLASSES[base] = LangStageGraphAgent
+    return cls
+
+
 def build_agent(
     graph: Any,
     *,
@@ -135,14 +204,28 @@ def build_agent(
     # supports interrupts/resume, both of which need a checkpointer. Many user
     # graphs are compiled without one (and would otherwise hard-crash with
     # "No checkpointer set"), so attach an in-memory default when absent.
+    #
+    # The saver goes on a COPY of the graph, never on the caller's object: assigning
+    # ``graph.checkpointer`` in place meant the next ``run_turn(graph, ...)`` /
+    # ``collect_*(graph, ...)`` found a checkpointer already attached and silently
+    # resumed the previous call's thread, so "one-shot" calls accumulated state
+    # (gh #163). Each build_agent(graph) now owns a fresh in-memory saver — build the
+    # agent once and reuse it (the documented pattern) to keep state across turns. A
+    # graph compiled WITH a checkpointer is used as-is (its state stays shared).
     if getattr(graph, "checkpointer", None) is None:
         try:
             from langgraph.checkpoint.memory import InMemorySaver
 
-            graph.checkpointer = InMemorySaver()
+            saver = InMemorySaver()
+            try:
+                graph = graph.copy(update={"checkpointer": saver})
+            except Exception:  # pragma: no cover - a graph-like without Pregel.copy()
+                graph.checkpointer = saver
         except Exception:  # pragma: no cover - best-effort; LangGraphAgent will surface real issues
             pass
-    return LangGraphAgent(name=name, graph=graph, description=description, config=config)
+    return _agent_class(LangGraphAgent)(
+        name=name, graph=graph, description=description, config=config
+    )
 
 
 def add_agui_endpoint(
@@ -188,7 +271,12 @@ def add_agui_endpoint(
 
         async def gen():
             try:
-                async for ev in run_agent.run(input_data):
+                # _TurnStream: a node that returns a finished (non-token-streamed)
+                # AIMessage used to reach a served client ONLY inside the closing
+                # MESSAGES_SNAPSHOT (zero TEXT_MESSAGE_* events), while the in-process
+                # iter_* wires streamed it as content. The same step-level
+                # reconstruction now feeds both, so served and in-process agree (gh #140).
+                async for ev in _TurnStream(run_agent, input_data).events():
                     # run() yields SSE-encoded strings; encode objects defensively.
                     yield ev if isinstance(ev, (str, bytes)) else encoder.encode(ev)
             except Exception as exc:  # noqa: BLE001 - surfaced to the client as RUN_ERROR
@@ -410,9 +498,12 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
     (gh #91). This walks assistant **and** tool messages and yields normalized
     items each wire renders in its own vocabulary:
 
-      ``{"kind": "content", "text", "node"}``          — an assistant text message
-      ``{"kind": "tool_call", "name", "args", "id"}``  — a tool call not streamed
-      ``{"kind": "tool_result", "name", "raw", "id", "error"}`` — a result not streamed
+      ``{"kind": "content", "text", "node", "id"}``    — an assistant text message
+      ``{"kind": "tool_call", "name", "args", "id", "message_id"}`` — a tool call not streamed
+      ``{"kind": "tool_result", "name", "raw", "id", "message_id", "error"}`` — a result not streamed
+
+    Within one assistant message its text is yielded BEFORE its tool calls, so a
+    "narrate, then call a tool" message renders in causal order (gh langstage-cli #119).
 
     Dedup mirrors how a fully-streamed turn already emitted things during the run,
     so nothing double-renders: content by message id (``streamed_ids``), tool calls
@@ -444,6 +535,26 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
     for m in tail:
         role = getattr(m, "role", None)
         if role == "assistant":
+            mid = getattr(m, "id", None)
+            # In-message order: a message's own TEXT comes before its tool calls. The
+            # #91 walk yielded the tool calls first, so a finished
+            # ``AIMessage("Let me check the weather.", tool_calls=[...])`` rendered its
+            # tool call BEFORE the narration that motivates it, and the tool result then
+            # jammed onto the narration's line in the cli (gh langstage-cli #119).
+            content = getattr(m, "content", None)
+            if content:
+                if mid not in streamed_ids:
+                    idx = ci - offset
+                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
+                    # Prefer the ORIGINAL message's full text: ag-ui's
+                    # resolve_message_content flattens a multi-text-block AIMessage to
+                    # only its FIRST block, so the snapshot ``content`` silently drops
+                    # later blocks (gh langstage-vscode #75). full_text_by_id carries the
+                    # checkpoint message's joined ``.text`` keyed by id; fall back to
+                    # ag-ui's content when absent (single-block, tool-only, or no state).
+                    text = full_text_by_id.get(str(mid), content) if full_text_by_id else content
+                    yield {"kind": "content", "text": text, "node": node, "id": mid}
+                ci += 1
             for tc in getattr(m, "tool_calls", None) or []:
                 tcid = getattr(tc, "id", None)
                 fn = getattr(tc, "function", None)
@@ -457,22 +568,8 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
                     args = json.loads(raw_args) if raw_args else {}
                 except json.JSONDecodeError:
                     args = {"_raw": raw_args}
-                yield {"kind": "tool_call", "name": name, "args": args, "id": tcid}
-            content = getattr(m, "content", None)
-            if content:
-                if getattr(m, "id", None) not in streamed_ids:
-                    idx = ci - offset
-                    node = step_nodes[idx] if 0 <= idx < len(step_nodes) else current_node
-                    # Prefer the ORIGINAL message's full text: ag-ui's
-                    # resolve_message_content flattens a multi-text-block AIMessage to
-                    # only its FIRST block, so the snapshot ``content`` silently drops
-                    # later blocks (gh langstage-vscode #75). full_text_by_id carries the
-                    # checkpoint message's joined ``.text`` keyed by id; fall back to
-                    # ag-ui's content when absent (single-block, tool-only, or no state).
-                    mid = getattr(m, "id", None)
-                    text = full_text_by_id.get(str(mid), content) if full_text_by_id else content
-                    yield {"kind": "content", "text": text, "node": node}
-                ci += 1
+                yield {"kind": "tool_call", "name": name, "args": args, "id": tcid,
+                       "message_id": mid}
         elif role == "tool":
             tcid = getattr(m, "tool_call_id", None)
             if tcid in streamed_result_ids:
@@ -482,8 +579,302 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
                 "name": names.get(tcid, "tool"),
                 "raw": getattr(m, "content", "") or "",
                 "id": tcid,
+                "message_id": getattr(m, "id", None),
                 "error": bool(getattr(m, "error", None)),
             }
+
+
+def _message_text(m) -> str:
+    """The joined text of a LangChain message (all ``text`` blocks, like ``AIMessage.text``).
+
+    langchain_core >=1.x exposes ``.text`` as a property returning a str (a callable str
+    subclass, for back-compat); older versions expose a ``.text()`` method. Read the
+    property value; only CALL it when it isn't already a str. Falls back to a plain-str
+    ``content``; returns ``""`` when there is no text.
+    """
+    text = getattr(m, "text", None)
+    if callable(text) and not isinstance(text, str):
+        try:
+            text = text()
+        except Exception:  # pragma: no cover
+            text = None
+    if isinstance(text, str):
+        return str(text)
+    content = getattr(m, "content", None)
+    return content if isinstance(content, str) else ""
+
+
+def _as_snapshot_message(m):
+    """Adapt a checkpoint (LangChain) message to the attribute shape
+    :func:`_snapshot_items` walks (the ag-ui ``MessagesSnapshotEvent`` message shape):
+    ``role`` / ``id`` / ``content`` (+ ``tool_calls[*].id/.function.name/.arguments`` on
+    an assistant message, ``tool_call_id`` / ``error`` on a tool message)."""
+    import json
+    from types import SimpleNamespace
+
+    kind = getattr(m, "type", None)
+    role = {"ai": "assistant", "AIMessageChunk": "assistant", "human": "user",
+            "tool": "tool", "system": "system"}.get(kind, kind)
+    mid = getattr(m, "id", None)
+    out = SimpleNamespace(role=role, id=str(mid) if mid is not None else None,
+                          content=_message_text(m))
+    if role == "assistant":
+        calls = []
+        for tc in getattr(m, "tool_calls", None) or []:
+            tc = tc if isinstance(tc, dict) else {}
+            try:
+                arguments = json.dumps(tc.get("args") or {})
+            except (TypeError, ValueError):
+                arguments = json.dumps({"_raw": str(tc.get("args"))})
+            calls.append(SimpleNamespace(
+                id=tc.get("id"),
+                function=SimpleNamespace(name=tc.get("name") or "tool", arguments=arguments),
+            ))
+        out.tool_calls = calls
+    elif role == "tool":
+        content = getattr(m, "content", "")
+        out.content = content if isinstance(content, str) else (_message_text(m) or str(content))
+        out.tool_call_id = getattr(m, "tool_call_id", None)
+        out.error = getattr(m, "status", None) == "error"
+    return out
+
+
+class _TurnStream:
+    """Drive ``agent.run(run_input)`` and surface **finished** messages as real AG-UI
+    events at the step that produced them: the one place both ``iter_*`` wires and the
+    served endpoint get their "non-token-streamed message" handling from.
+
+    ag-ui-langgraph only emits ``TEXT_MESSAGE_*`` / ``TOOL_CALL_*`` for what a model
+    *streams*. A node that returns a finished ``AIMessage`` (``model.invoke()``, a
+    router, a canned reply, a forwarded sub-agent result) produced nothing until the
+    closing ``MESSAGES_SNAPSHOT``. The in-process ``iter_*`` mappings patched that by
+    walking the snapshot at the very end (gh #89/#91), which left four holes:
+
+    - the **served** wire (``build_app`` / ``serve``) forwards upstream events verbatim, so
+      a finished message emitted zero ``TEXT_MESSAGE_*`` events there (gh #140);
+    - everything arrived at the END, so a finished ``AIMessage`` carrying text + a tool
+      call rendered its text AFTER the tool had already run (gh langstage-cli #119);
+    - when a later node errored, the snapshot never came, so content an earlier node had
+      already produced and committed was dropped (gh langstage-vscode #105);
+    - consecutive finished messages carried no message identity (gh langstage-vscode #108).
+
+    So after every ``StepFinishedEvent`` (and before ``MESSAGES_SNAPSHOT`` /
+    ``RUN_ERROR`` / an exception) this reads the thread's checkpoint (LangGraph has
+    already committed a step's writes by the time the step finishes) and synthesizes
+    ``TEXT_MESSAGE_START/CONTENT/END``, ``TOOL_CALL_START/ARGS/END`` and
+    ``TOOL_CALL_RESULT`` for each message of THIS turn that was not already streamed,
+    using the checkpoint's own message / tool-call ids (the same ids the final
+    ``MESSAGES_SNAPSHOT`` carries). Messages already in the checkpoint before the run
+    (history, or the pre-interrupt part of a resumed turn) are never re-emitted. An
+    upstream ``TOOL_CALL_START/ARGS/END`` for a call already synthesized (a ``ToolNode``
+    re-announces the call when the tool finishes) is suppressed, so a client never sees
+    one tool call twice.
+
+    Best-effort: an agent without a readable ``.graph`` checkpoint (a test double, an
+    odd graph) makes this a transparent pass-through, and the end-of-turn snapshot walk
+    in the ``iter_*`` mappings remains the fallback.
+    """
+
+    def __init__(self, agent, run_input):
+        self.agent = agent
+        self.run_input = run_input
+        self.thread_id = getattr(run_input, "thread_id", None)
+        self.text_ids: set = set()
+        self.call_ids: set = set()
+        self.result_ids: set = set()
+        self._synth_call_ids: set = set()
+        self._synth_result_ids: set = set()
+        # tool_call_ids whose checkpoint ToolMessage has status="error". The AG-UI
+        # ToolCallResultEvent has no status field, so the iter_* mappings read it here.
+        self.errored_result_ids: set = set()
+        self._pre_ids: set | None = None
+
+    async def _checkpoint_messages(self):
+        graph = getattr(self.agent, "graph", None)
+        aget_state = getattr(graph, "aget_state", None)
+        if aget_state is None or self.thread_id is None:
+            return None
+        try:
+            state = await aget_state({"configurable": {"thread_id": self.thread_id}})
+        except Exception:  # noqa: BLE001 - best-effort; never fatal to the turn
+            return None
+        values = getattr(state, "values", None)
+        if values is None:
+            return []
+        if not isinstance(values, dict):
+            return None
+        msgs = values.get("messages") or []
+        return list(msgs) if isinstance(msgs, (list, tuple)) else None
+
+    async def _flush(self):
+        if self._pre_ids is None:
+            return
+        msgs = await self._checkpoint_messages()
+        if not msgs:
+            return
+        new = [
+            _as_snapshot_message(m) for m in msgs
+            if getattr(m, "id", None) is not None and str(m.id) not in self._pre_ids
+        ]
+        if not new:
+            return
+        import json
+
+        from ag_ui.core import (
+            EventType,
+            TextMessageContentEvent,
+            TextMessageEndEvent,
+            TextMessageStartEvent,
+            ToolCallArgsEvent,
+            ToolCallEndEvent,
+            ToolCallResultEvent,
+            ToolCallStartEvent,
+        )
+
+        for item in _snapshot_items(
+            new,
+            streamed_ids=self.text_ids,
+            tool_names=dict.fromkeys(self.call_ids, ""),
+            streamed_result_ids=self.result_ids,
+            step_nodes=[],
+            current_node="",
+        ):
+            kind = item["kind"]
+            if kind == "content":
+                mid = item["id"]
+                if mid is None or not item["text"]:
+                    continue
+                self.text_ids.add(mid)
+                yield TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START, message_id=mid, role="assistant")
+                yield TextMessageContentEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT, message_id=mid, delta=item["text"])
+                yield TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=mid)
+            elif kind == "tool_call":
+                tcid = item["id"]
+                if tcid is None:
+                    continue
+                self.call_ids.add(tcid)
+                self._synth_call_ids.add(tcid)
+                yield ToolCallStartEvent(
+                    type=EventType.TOOL_CALL_START, tool_call_id=tcid,
+                    tool_call_name=item["name"], parent_message_id=item.get("message_id"))
+                yield ToolCallArgsEvent(
+                    type=EventType.TOOL_CALL_ARGS, tool_call_id=tcid,
+                    delta=json.dumps(item["args"]))
+                yield ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tcid)
+            elif kind == "tool_result":
+                tcid = item["id"]
+                if tcid is None:
+                    continue
+                self.result_ids.add(tcid)
+                self._synth_result_ids.add(tcid)
+                if item.get("error"):
+                    self.errored_result_ids.add(tcid)
+                yield ToolCallResultEvent(
+                    type=EventType.TOOL_CALL_RESULT, message_id=item.get("message_id") or tcid,
+                    tool_call_id=tcid, content=str(item["raw"]), role="tool")
+
+    async def events(self):
+        base = await self._checkpoint_messages()
+        if base is not None:
+            self._pre_ids = {str(m.id) for m in base if getattr(m, "id", None) is not None}
+        try:
+            async for ev in self.agent.run(self.run_input):
+                t = type(ev).__name__
+                if t in ("StepFinishedEvent", "MessagesSnapshotEvent", "RunErrorEvent"):
+                    async for synth in self._flush():
+                        yield synth
+                elif t in ("TextMessageStartEvent", "TextMessageContentEvent",
+                           "TextMessageEndEvent", "TextMessageChunkEvent"):
+                    mid = getattr(ev, "message_id", None)
+                    if mid is not None:
+                        self.text_ids.add(mid)
+                elif t in ("ToolCallStartEvent", "ToolCallArgsEvent", "ToolCallEndEvent",
+                           "ToolCallChunkEvent"):
+                    tcid = getattr(ev, "tool_call_id", None)
+                    if tcid in self._synth_call_ids:
+                        continue  # already announced from the checkpoint; don't repeat it
+                    if tcid is not None and t in ("ToolCallStartEvent", "ToolCallChunkEvent"):
+                        self.call_ids.add(tcid)
+                elif t == "ToolCallResultEvent":
+                    tcid = getattr(ev, "tool_call_id", None)
+                    if tcid in self._synth_result_ids:
+                        continue
+                    if tcid is not None:
+                        self.result_ids.add(tcid)
+                yield ev
+        except Exception:
+            # A node raised mid-turn: surface what earlier nodes already produced and
+            # committed before the error propagates (gh langstage-vscode #105).
+            async for synth in self._flush():
+                yield synth
+            raise
+
+
+class _ToolTracker:
+    """Per-turn tool bookkeeping shared by both ``iter_*`` mappings: which tool calls
+    failed, and how long each ran.
+
+    - **Error status** (gh #55, #168): the AG-UI ``ToolCallResultEvent`` drops the
+      ToolMessage status, so a failed tool otherwise looks like a success. The adapter's
+      ``on_tool_error`` RawEvent carries the ``tool_call_id`` (keyed precisely); a payload
+      without it falls back to counting by tool name, as before.
+    - **Duration** (gh langstage#160): ``on_tool_start`` then ``on_tool_end`` /
+      ``on_tool_error`` RawEvents bracket the actual tool execution (keyed by run id; the
+      end event carries the ``tool_call_id``). A tool invoked outside LangChain's tool
+      runtime (a hand-written node returning a ``ToolMessage``) has no such events, so its
+      ``duration_ms`` stays ``None`` rather than a made-up number.
+    """
+
+    def __init__(self):
+        self._started: dict = {}
+        self._duration_ms: dict = {}
+        self._errored_ids: set = set()
+        self._errored_names: dict = {}
+
+    def on_raw(self, raw) -> None:
+        import time
+
+        if not isinstance(raw, dict):
+            return
+        kind = raw.get("event")
+        if kind not in ("on_tool_start", "on_tool_end", "on_tool_error"):
+            return
+        run_id = raw.get("run_id")
+        if kind == "on_tool_start":
+            if run_id is not None:
+                self._started[run_id] = time.monotonic()
+            return
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        tcid = data.get("tool_call_id")
+        output = data.get("output")
+        if tcid is None and output is not None:
+            tcid = (output.get("tool_call_id") if isinstance(output, dict)
+                    else getattr(output, "tool_call_id", None))
+        started = self._started.pop(run_id, None) if run_id is not None else None
+        if tcid is not None and started is not None:
+            self._duration_ms[tcid] = max(0, round((time.monotonic() - started) * 1000))
+        status = (output.get("status") if isinstance(output, dict)
+                  else getattr(output, "status", None))
+        if kind == "on_tool_error" or status == "error":
+            if tcid is not None:
+                self._errored_ids.add(tcid)
+            else:
+                name = raw.get("name")
+                if name:
+                    self._errored_names[name] = self._errored_names.get(name, 0) + 1
+
+    def result(self, tool_call_id, name, known_error: bool = False):
+        """Return ``(is_error, duration_ms)`` for one tool result, consuming the bookkeeping."""
+        is_error = known_error
+        if tool_call_id in self._errored_ids:
+            self._errored_ids.discard(tool_call_id)
+            is_error = True
+        elif not is_error and self._errored_names.get(name, 0) > 0:
+            self._errored_names[name] -= 1
+            is_error = True
+        return is_error, self._duration_ms.pop(tool_call_id, None)
 
 
 def _unwrap_resume(resume):
@@ -593,6 +984,13 @@ async def iter_event_frames(
     vscode sidecar and the web ``SessionAdapter``): swap ``StreamParser`` for the
     in-process AG-UI adapter without changing what the client renders.
 
+    Frame keys beyond the original vocabulary are additive: ``content`` frames carry
+    ``message_id`` (a change of id is a message boundary), ``tool_end`` carries a real
+    ``duration_ms`` when the tool ran through LangChain's tool runtime, and the terminal
+    ``complete`` frame carries ``outcome`` (``"complete"`` / ``"interrupted"``). An
+    ``error`` frame is terminal. A finished (non-token-streamed) message is emitted when
+    its node finishes, text before its own tool calls (see :class:`_TurnStream`).
+
     ``agent`` is an already-built ``LangGraphAgent`` (see :func:`build_agent`).
     ``resume`` (a decision answering an interrupt) rides
     ``forwarded_props.command.resume`` -> LangGraph ``Command(resume=...)``.
@@ -653,11 +1051,11 @@ async def iter_event_frames(
     # letting renderers separate one node's output from the next (gh #43).
     current_node = "agent"
     step_nodes: list[str] = []
-    # Tool names that raised (from on_tool_error RawEvents). The AG-UI
-    # ToolCallResultEvent drops the ToolMessage status, so a failed tool otherwise
-    # renders as "success"; on_tool_error fires before the result, so we flag it by
-    # name and correct the tool_end frame. (gh #55)
-    errored_tools: dict[str, int] = {}
+    # Tool error status (gh #55) + duration (gh langstage#160), from the adapter's
+    # on_tool_start / on_tool_end / on_tool_error RawEvents — shared with the chunk wire.
+    tools = _ToolTracker()
+    # An `interrupt` frame went out: the terminal `complete` then says so (gh #152).
+    saw_interrupt = False
 
     try:
         # Accept a bare compiled graph, not just a prebuilt LangGraphAgent (gh #117):
@@ -676,7 +1074,12 @@ async def iter_event_frames(
         # (TypeError mid-stream). clone() keeps the graph + checkpointer (thread
         # state) but isolates the run, like build_app / SessionAdapter. (gh #165)
         agent = agent.clone() if hasattr(agent, "clone") else agent
-        async for ev in agent.run(run_input):
+        # _TurnStream surfaces finished (non-token-streamed) messages as real AG-UI
+        # events at the step that produced them — in message order, before a later
+        # node can error — shared with iter_chunk_frames and the served endpoint
+        # (gh #140, langstage-cli #119, langstage-vscode #105/#108).
+        stream = _TurnStream(agent, run_input)
+        async for ev in stream.events():
             t = type(ev).__name__
             if t == "StepStartedEvent":
                 step = getattr(ev, "step_name", None)
@@ -684,17 +1087,18 @@ async def iter_event_frames(
                     current_node = step
                     step_nodes.append(step)
             elif t == "RawEvent":
-                raw = getattr(ev, "event", None) or {}
-                if raw.get("event") == "on_tool_error":
-                    nm = raw.get("name")
-                    if nm:
-                        errored_tools[nm] = errored_tools.get(nm, 0) + 1
+                tools.on_raw(getattr(ev, "event", None) or {})
             elif t == "TextMessageContentEvent":
                 streamed_text = True
                 mid = getattr(ev, "message_id", None)
                 if mid is not None:
                     streamed_ids.add(mid)
-                yield {"type": "content", "content": ev.delta, "role": "assistant", "node": current_node}
+                # message_id: the AIMessage this delta belongs to. A change of id between
+                # two content frames is a message boundary, e.g. two nodes' finished
+                # replies, which consumers join with a paragraph break instead of gluing
+                # them into one line (gh langstage-vscode #108).
+                yield {"type": "content", "content": ev.delta, "role": "assistant",
+                       "node": current_node, "message_id": mid}
             elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
                 # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
                 # DeepSeek R1, Qwen, xAI, ...). Surface it as the advertised `reasoning`
@@ -727,9 +1131,9 @@ async def iter_event_frames(
                 streamed_result_ids.add(ev.tool_call_id)
                 result = _truncate_result(str(getattr(ev, "content", "")), max_result_len)
                 name = tool_names.get(ev.tool_call_id, "tool")
-                is_error = errored_tools.get(name, 0) > 0
-                if is_error:
-                    errored_tools[name] -= 1
+                is_error, duration_ms = tools.result(
+                    ev.tool_call_id, name, ev.tool_call_id in stream.errored_result_ids
+                )
                 yield {
                     "type": "tool_end",
                     "id": ev.tool_call_id,
@@ -737,9 +1141,12 @@ async def iter_event_frames(
                     "result": result,
                     "status": "error" if is_error else "success",
                     "error_message": result if is_error else None,
-                    "duration_ms": None,
+                    "duration_ms": duration_ms,
                 }
-                extractor = by_tool.get(name, default_extractor)
+                # No extraction for a FAILED tool: the extractor would build a
+                # success-shaped card out of the framework's error string, contradicting
+                # the tool_end that just said status="error" (gh #177).
+                extractor = None if is_error else by_tool.get(name, default_extractor)
                 if extractor is not None:
                     # A structured extractor parses raw content, so it must see the
                     # full result. A display-passthrough one (GenericToolExtractor,
@@ -770,6 +1177,7 @@ async def iter_event_frames(
                 action_requests, review_configs, decisions = _normalize_interrupt(
                     payload, allowed_decisions
                 )
+                saw_interrupt = True
                 yield {
                     "type": "interrupt",
                     "action_requests": action_requests,
@@ -797,7 +1205,8 @@ async def iter_event_frames(
                 ):
                     if item["kind"] == "content":
                         yield {"type": "content", "content": item["text"],
-                               "role": "assistant", "node": item["node"]}
+                               "role": "assistant", "node": item["node"],
+                               "message_id": item["id"]}
                     elif item["kind"] == "tool_call":
                         # A snapshot tool call reconstructs the streaming tool_start;
                         # its result arrives as a separate tool message -> tool_end below.
@@ -805,10 +1214,12 @@ async def iter_event_frames(
                                "args": item["args"], "node": current_node}
                     elif item["kind"] == "tool_result":
                         result = _truncate_result(str(item["raw"]), max_result_len)
+                        is_error, duration_ms = tools.result(item["id"], item["name"], item["error"])
                         yield {"type": "tool_end", "id": item["id"], "name": item["name"],
-                               "result": result, "status": "error" if item["error"] else "success",
-                               "error_message": result if item["error"] else None, "duration_ms": None}
-                        extractor = by_tool.get(item["name"], default_extractor)
+                               "result": result, "status": "error" if is_error else "success",
+                               "error_message": result if is_error else None,
+                               "duration_ms": duration_ms}
+                        extractor = None if is_error else by_tool.get(item["name"], default_extractor)
                         if extractor is not None:
                             ex = result if getattr(extractor, "caps_content", False) else str(item["raw"])
                             data = extractor.extract(ex)
@@ -826,7 +1237,11 @@ async def iter_event_frames(
         yield {"type": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
         return
 
-    yield {"type": "complete"}
+    # The terminal frame names the outcome, so a paused HITL turn is distinguishable
+    # from a normal finish without replaying the stream: "interrupted" when an
+    # `interrupt` frame went out, else "complete". Additive — `type` is unchanged, and an
+    # error turn still ends with its `error` frame and no `complete` (gh #152).
+    yield {"type": "complete", "outcome": _terminal_outcome(saw_interrupt=saw_interrupt, saw_error=False)}
 
 
 async def iter_chunk_frames(
@@ -840,8 +1255,21 @@ async def iter_chunk_frames(
     state: Any = None,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``status``-keyed
-    chunk-dict frames (``{"status": "streaming", "chunk"/"tool_calls"/"tool_result"/"extraction": ...}``,
-    ``{"status": "interrupt", ...}``, ``{"status": "complete"}``, ``{"status": "error"}``).
+    chunk-dict frames. A ``streaming`` chunk carries exactly ONE payload key — branch on
+    it, never assume ``chunk`` (gh #169):
+
+    - ``{"status": "streaming", "chunk": str, "node", "message_id"}`` — assistant text;
+      a change of ``message_id`` is a message boundary;
+    - ``{"status": "streaming", "reasoning": str, "node"}`` — reasoning deltas;
+    - ``{"status": "streaming", "tool_calls": [{"name", "args", "id"}]}``;
+    - ``{"status": "streaming", "tool_result": str, "id", "name", "tool_status",
+      "duration_ms"}`` — ``tool_status`` is ``"success"`` / ``"error"``;
+    - ``{"status": "streaming", "extraction": {"tool_name", "extracted_type", "data"}}``
+      (successful tool results only);
+
+    then ``{"status": "interrupt", "interrupt": {...}}``, and exactly one terminal
+    frame: ``{"status": "complete", "outcome": "complete" | "interrupted"}`` or
+    ``{"status": "error", "error"}`` (nothing follows an error).
 
     The chunk-dict counterpart of :func:`iter_event_frames`: the render wire the cli and
     Jupyter loops consume. ``resume`` rides ``forwarded_props.command.resume``; ``state``
@@ -908,6 +1336,11 @@ async def iter_chunk_frames(
     # it to separate one node's output from the next (gh #43).
     current_node = "agent"
     step_nodes: list[str] = []
+    # Tool error status + duration, the same bookkeeping the event wire uses. The chunk
+    # wire used to have none, so a failed tool rendered exactly like a success on the
+    # CLI/Jupyter wire (gh #168).
+    tools = _ToolTracker()
+    saw_interrupt = False  # the terminal `complete` names the outcome (gh #152)
 
     try:
         # Auto-wrap a bare compiled graph, exactly as iter_event_frames does (gh #117):
@@ -917,19 +1350,26 @@ async def iter_chunk_frames(
         # bad input becomes a clean terminal ``error`` frame via the except below.
         agent = agent if hasattr(agent, "run") else build_agent(agent)
         agent = agent.clone() if hasattr(agent, "clone") else agent  # per-run isolation (gh #165)
-        async for ev in agent.run(run_input):
+        # Finished messages surface at the step that produced them (see _TurnStream;
+        # gh #140, langstage-cli #119, langstage-vscode #105/#108).
+        stream = _TurnStream(agent, run_input)
+        async for ev in stream.events():
             t = type(ev).__name__
             if t == "StepStartedEvent":
                 step = getattr(ev, "step_name", None)
                 if step:
                     current_node = step
                     step_nodes.append(step)
+            elif t == "RawEvent":
+                tools.on_raw(getattr(ev, "event", None) or {})
             elif t == "TextMessageContentEvent":
                 streamed_text = True
                 mid = getattr(ev, "message_id", None)
                 if mid is not None:
                     streamed_ids.add(mid)
-                yield {"status": "streaming", "chunk": ev.delta, "node": current_node}
+                # message_id marks message boundaries, as on the event wire (vscode #108).
+                yield {"status": "streaming", "chunk": ev.delta, "node": current_node,
+                       "message_id": mid}
             elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
                 # Reasoning-model chain-of-thought on the chunk wire — a distinct
                 # `reasoning` key (parallel to `chunk`) so renderers can style/collapse
@@ -948,7 +1388,11 @@ async def iter_chunk_frames(
                     args = json.loads(tc["args"]) if tc["args"] else {}
                 except json.JSONDecodeError:
                     args = {"_raw": tc["args"]}
-                yield {"status": "streaming", "tool_calls": [{"name": tc["name"], "args": args}]}
+                # `id` carries the tool-call id the event wire's tool_start has always
+                # carried, so collect_chunk_frames / `--json` no longer report `id: None`
+                # and a tool_result can be correlated to its call (gh #149).
+                yield {"status": "streaming",
+                       "tool_calls": [{"name": tc["name"], "args": args, "id": ev.tool_call_id}]}
             elif t == "ToolCallResultEvent":
                 # Cap the result the way the event wire has always capped its `tool_end`
                 # frame (gh #102) — the CLI/Jupyter render loops read this chunk straight
@@ -957,13 +1401,21 @@ async def iter_chunk_frames(
                 # display-passthrough one is fed the capped result (gh #106).
                 streamed_result_ids.add(ev.tool_call_id)
                 result = _truncate_result(getattr(ev, "content", ""), max_result_len)
-                yield {"status": "streaming", "tool_result": result}
+                name = tool_names.get(ev.tool_call_id, "tool")
+                is_error, duration_ms = tools.result(
+                    ev.tool_call_id, name, ev.tool_call_id in stream.errored_result_ids
+                )
+                # `tool_result` stays the (capped) result string; the sibling keys are
+                # additive: `tool_status` ("success" | "error") mirrors the event wire's
+                # tool_end `status` (gh #168), plus the call `id` / `name` / `duration_ms`.
+                yield {"status": "streaming", "tool_result": result, "id": ev.tool_call_id,
+                       "name": name, "tool_status": "error" if is_error else "success",
+                       "duration_ms": duration_ms}
                 # Run the matching extractor over the tool result and, on a non-None
                 # return, emit an `extraction` chunk — parity with iter_event_frames'
                 # `extraction` frame so the CLI/Jupyter surfaces can render the same
-                # skill/memory/todo callouts (gh #92).
-                name = tool_names.get(ev.tool_call_id, "tool")
-                extractor = by_tool.get(name, default_extractor)
+                # skill/memory/todo callouts (gh #92). Never for a failed tool (gh #177).
+                extractor = None if is_error else by_tool.get(name, default_extractor)
                 if extractor is not None:
                     ex_content = result if getattr(extractor, "caps_content", False) else getattr(ev, "content", "")
                     data = extractor.extract(ex_content)
@@ -990,6 +1442,7 @@ async def iter_chunk_frames(
                 # (cli: interrupt_data.get("action_requests")) doesn't crash on the
                 # standard HumanInterrupt *list* shape and gets a populated request. (#40)
                 action_requests, review_configs, decisions = _normalize_interrupt(payload)
+                saw_interrupt = True
                 yield {
                     "status": "interrupt",
                     "interrupt": {
@@ -1018,14 +1471,20 @@ async def iter_chunk_frames(
                     full_text_by_id=full_text_by_id,
                 ):
                     if item["kind"] == "content":
-                        yield {"status": "streaming", "chunk": item["text"], "node": item["node"]}
+                        yield {"status": "streaming", "chunk": item["text"], "node": item["node"],
+                               "message_id": item["id"]}
                     elif item["kind"] == "tool_call":
                         yield {"status": "streaming",
-                               "tool_calls": [{"name": item["name"], "args": item["args"]}]}
+                               "tool_calls": [{"name": item["name"], "args": item["args"],
+                                               "id": item["id"]}]}
                     elif item["kind"] == "tool_result":
                         result = _truncate_result(item["raw"], max_result_len)
-                        yield {"status": "streaming", "tool_result": result}
-                        extractor = by_tool.get(item["name"], default_extractor)
+                        is_error, duration_ms = tools.result(item["id"], item["name"], item["error"])
+                        yield {"status": "streaming", "tool_result": result, "id": item["id"],
+                               "name": item["name"],
+                               "tool_status": "error" if is_error else "success",
+                               "duration_ms": duration_ms}
+                        extractor = None if is_error else by_tool.get(item["name"], default_extractor)
                         if extractor is not None:
                             ex = result if getattr(extractor, "caps_content", False) else item["raw"]
                             data = extractor.extract(ex)
@@ -1036,6 +1495,9 @@ async def iter_chunk_frames(
                                                       "data": data}}
             elif t == "RunErrorEvent":
                 yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
+                # Terminal, exactly like the event wire and the exception path below:
+                # without this return a trailing `complete` followed the error (gh #161).
+                return
 
     except Exception as exc:  # noqa: BLE001 — a node/graph exception during streaming surfaces
         # as the documented terminal `error` frame instead of propagating out of the iterator
@@ -1044,7 +1506,10 @@ async def iter_chunk_frames(
         yield {"status": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
         return
 
-    yield {"status": "complete"}
+    # Names the outcome ("interrupted" after an `interrupt` chunk, else "complete"),
+    # mirroring the event wire's terminal frame (gh #152). Additive.
+    yield {"status": "complete",
+           "outcome": _terminal_outcome(saw_interrupt=saw_interrupt, saw_error=False)}
 
 
 # Imported at the bottom so verify.py / collect.py can reference build_agent /

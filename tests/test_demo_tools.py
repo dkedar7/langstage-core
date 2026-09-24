@@ -52,7 +52,7 @@ async def test_content_frame_event_wire():
     content = [f for f in frames if f.get("type") == "content"]
     assert content, frames
     assert "hello there" in "".join(f["content"] for f in content)
-    assert frames[-1] == {"type": "complete"}
+    assert frames[-1] == {"type": "complete", "outcome": "complete"}
     # token-by-token: the reply arrives as multiple content frames, not one blob.
     assert len(content) > 1
 
@@ -61,7 +61,7 @@ async def test_content_frame_chunk_wire():
     frames = await _collect(iter_chunk_frames(_agent(), "hello there", "c-c"))
     chunks = [f for f in frames if f.get("status") == "streaming" and "chunk" in f]
     assert chunks and "hello there" in "".join(f["chunk"] for f in chunks)
-    assert frames[-1] == {"status": "complete"}
+    assert frames[-1] == {"status": "complete", "outcome": "complete"}
 
 
 # ── reasoning ("think") — surfaced as a `reasoning` frame, separate from content ──
@@ -75,7 +75,7 @@ async def test_reasoning_frame_event_wire():
     assert content, "reasoning turn must still produce a content answer"
     # reasoning is the chain-of-thought, never the answer text.
     assert "reason" in "".join(f["content"] for f in reasoning).lower()
-    assert frames[-1] == {"type": "complete"}
+    assert frames[-1] == {"type": "complete", "outcome": "complete"}
 
 
 async def test_reasoning_frame_chunk_wire():
@@ -84,7 +84,7 @@ async def test_reasoning_frame_chunk_wire():
     chunks = [f for f in frames if "chunk" in f]
     assert reasoning, f"no reasoning chunk: {frames}"
     assert chunks, "reasoning turn must still stream a content answer"
-    assert frames[-1] == {"status": "complete"}
+    assert frames[-1] == {"status": "complete", "outcome": "complete"}
 
 
 # ── tool_start → tool_end → extraction ("use a tool"), via a REAL ToolNode ───────
@@ -104,7 +104,7 @@ async def test_tool_frames_event_wire():
     assert extraction[0]["extracted_type"] == "demo_fact"
     assert extraction[0]["data"]["answer"] == "42"
     assert content, "the tool turn must end with a content summary"
-    assert frames[-1] == {"type": "complete"}
+    assert frames[-1] == {"type": "complete", "outcome": "complete"}
 
 
 async def test_tool_frames_chunk_wire():
@@ -120,7 +120,7 @@ async def test_tool_frames_chunk_wire():
     assert extraction and extraction[0]["extracted_type"] == "demo_fact"
     assert extraction[0]["data"]["answer"] == "42"
     assert chunks, "the tool turn must end with a content summary"
-    assert frames[-1] == {"status": "complete"}
+    assert frames[-1] == {"status": "complete", "outcome": "complete"}
 
 
 # ── interrupt ("ask me") + resume ────────────────────────────────────────────────
@@ -160,7 +160,7 @@ async def test_interrupt_resumes_event_wire():
     assert not any(f.get("type") == "error" for f in resumed), resumed
     content = "".join(f["content"] for f in resumed if f.get("type") == "content")
     assert "approve" in content, f"resume decision not reflected: {content!r}"
-    assert resumed[-1] == {"type": "complete"}
+    assert resumed[-1] == {"type": "complete", "outcome": "complete"}
 
 
 async def test_interrupt_resumes_chunk_wire():
@@ -176,7 +176,7 @@ async def test_interrupt_resumes_chunk_wire():
     assert not any(f.get("status") == "error" for f in resumed), resumed
     text = "".join(f["chunk"] for f in resumed if "chunk" in f)
     assert "approve" in text
-    assert resumed[-1] == {"status": "complete"}
+    assert resumed[-1] == {"status": "complete", "outcome": "complete"}
 
 
 # ── the headline regression fixture: EVERY documented frame type is reachable ─────
