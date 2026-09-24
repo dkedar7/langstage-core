@@ -207,6 +207,10 @@ async for frame in iter_event_frames(agent, "", thread_id="s1",
 
 Decision types: `approve`, `reject`, `edit`, `respond` (deepagents 0.6+ / LangGraph 1.1+).
 
+`frame["allowed_decisions"]` is the interrupt's **own** decision set, not a fixed list: a standard HumanInterrupt's `config` (`allow_accept` → `approve`, `allow_edit` → `edit`, `allow_respond` → `respond`, `allow_ignore` → `reject`) or a HumanInTheLoopMiddleware payload's per-action `review_configs[*].allowed_decisions` decide it, so an approve-only interrupt advertises exactly `["approve"]`. The full four are the fallback only when the interrupt says nothing.
+
+`resume=` takes the raw payload or a `create_resume_input(...)` `Command`. On `ag-ui-langgraph` ≥ 0.0.43 it is sent on the adapter's standard `RunAgentInput.resume[]` (answering the thread's pending interrupt), so a resume logs no `forwardedProps.command.resume is deprecated` / `failed to parse … resume_input as JSON` warning; older adapters, or a thread with several pending interrupts, keep the legacy `forwarded_props.command.resume` wire.
+
 ## What's in the box
 
 Everything is re-exported from the top-level `langstage_core` package (except the AG-UI helpers under `langstage_core.agui`):
@@ -233,6 +237,8 @@ langstage-agui --agent my_agent.py:graph -m "hi there"   # run ONE turn with you
 ```
 
 `--verify` is the preflight to run right after wiring up an agent: `--show-config` proves the config chain *resolves* a spec, but `--verify` proves it **loads and actually produces a turn** — catching the two most common failures (a typo'd `module:attr`, or a graph that loads but yields an empty/erroring turn) that otherwise only surface at first chat. Keyless, so it fits a CI/deploy gate. `--message`/`-m` is its companion — run one turn with *your* prompt and print the answer (add `--json` for the typed `TurnResult`), exit `0`/`1`/`2` on complete/error/interrupt. The three questions every adopter asks, in order: `--show-config` (resolves?) → `--verify` (runs?) → `--message` (what does it say?).
+
+Every can't-run failure is a clean one-line `error:` on stderr, never a traceback (set `LANGSTAGE_DEBUG=1` for one): an agent that loads but isn't a runnable graph (e.g. a `StateGraph` you forgot to `.compile()`) exits `1` under both `--verify` and `--message` (`--json` still prints a typed `TurnResult` with `outcome: "error"`). When serving, the port is bound **before** the `Serving … at <url>` banner prints, so a port already in use is `error: cannot serve at <url>: …` and exit `2` (the serve path's can't-start code, like an unloadable spec), not a success banner followed by a crash. `serve()` binds first too and raises `OSError` for a busy port.
 
 ```python
 from langstage_core.agui import build_app
