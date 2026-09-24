@@ -1,5 +1,80 @@
 # Changelog
 
+## [1.0.36] - 2026-09-24
+
+Wave 2 of the 2026-09 family sweep: root causes that were filed separately in several
+surfaces, fixed once here (#183, #184, #185, #186).
+
+### Fixed
+- **Agent-spec loading.** A `file.py:attr` agent can import its sibling modules (its directory is
+  put on `sys.path`, idempotently) (#150; cli#145, web#167); a project-local
+  `package.module:attr` resolves from the cwd (or `base_dir=`) when not otherwise importable (#147;
+  cli#141). Specs are whitespace-stripped and `~`-expanded; a colon-less spec errors with a
+  `file.py:graph` hint; a `str` attribute raises `TypeError` instead of being re-read as another
+  spec (vscode#135, #125; jupyter#151; cli#149).
+- **Config-relative paths.** A relative `[agent] spec` / `[workspace] root` in a TOML file resolves
+  against that file's directory (project and global), not the cwd; `~` expands from every source,
+  including `apply_workspace` and the `workspace_root()` env fallback (cli#132, #133; vscode#123,
+  #126, #125).
+- **Import-time stdout.** `langstage-agui --verify` / `-m` / `--json` keep an agent's import-time
+  prints off stdout (cli#136, web#140).
+- **Honest config reporting.** `--show-config` / `python -m langstage_core.host` report a
+  present-but-malformed `langstage.toml` as MALFORMED (with the parse error) instead of "not found"
+  (#175; cli#140, hermes#151, vscode#110, web#170).
+- **Legacy aliases.** `DEEPAGENTS_CONFIG_HOME` and `DEEPAGENT_WORKSPACE_ROOT` emit the one-time
+  legacy notice (#167, #179); each legacy alias is announced exactly once (vscode#112).
+- **`debug` and booleans.** Error-frame tracebacks honor the resolved `debug` (legacy env, TOML)
+  (#137); a bare top-level key bound to a preceding `[table]` gets a note (#139); quoted TOML
+  booleans are coerced with the env-bool rules, unrecognized values degrade with a note
+  (jupyter#133).
+- **`[configurable]`** is forwarded to the graph by `langstage-agui` (serve and `--message`) and
+  shown by `--show-config` (#170; vscode#127).
+- **cp1252 consoles.** `--show-config`, `python -m langstage_core.host`, and `langstage-agui -m` no
+  longer crash with `UnicodeEncodeError` (#171, #153; web#146).
+- **Served wire parity.** `build_app` / `serve` stream TEXT_MESSAGE_* / TOOL_CALL_* for finished
+  (non-token-streamed) messages, matching the in-process wires (#140). Finished messages are emitted
+  when their node finishes, text before the message's own tool calls (cli#119); content from
+  earlier nodes is no longer dropped when a later node errors (vscode#105).
+- **Frame consistency.** Chunk-wire `error` is terminal (#161); chunk tool results carry error
+  status (#168) and tool calls carry `id` (#149); no `extraction` frame for a failed tool (#177);
+  `TurnResult.interrupt` is identical across collectors (#154).
+- **Isolated one-shots.** `build_agent` no longer mutates the caller's graph and `run_turn` uses a
+  fresh thread id per call (#163).
+- **stdlib `TypedDict` state** no longer fails every turn on Python 3.11 (web#166).
+- **HITL resume** rides ag-ui-langgraph's standard `RunAgentInput.resume` (0.0.43+,
+  feature-detected) instead of the deprecated `forwarded_props.command.resume`: no more
+  deprecation / "failed to parse resume_input" warnings on every resume; public `resume=` unchanged,
+  legacy wire kept as a fallback (#144; cli#126, #137; vscode#103).
+- **`allowed_decisions`** reflects the interrupt's own config (re-read from the checkpoint, since
+  ag-ui-langgraph >= 0.0.43 strips HumanInterrupt `config`); HumanInTheLoopMiddleware
+  `review_configs[*].allowed_decisions` honored (vscode#114).
+- **`langstage-agui` errors.** `-m` / `--json` report a non-runnable agent cleanly with exit 1, like
+  `--verify` (#180); the port is bound before "Serving ... at <url>" prints, so a busy port is a
+  clean error and exit 2, and `serve()` raises `OSError` (#143).
+
+### Added
+- `load_agent_spec(..., base_dir=, stdout_to_stderr=)`, `parse_agent_spec()`,
+  `HostConfig.toml_dir_for()`.
+- `langstage_core.console.safe_print` / `safe_write` / `console_safe`: console-safe output
+  (unencodable characters are backslash-escaped, never raised).
+- `HostConfig.config_issues()`, `HostConfig.malformed_toml()`, `HostConfig.configurable()`;
+  `config_dict()["toml"]` gains `malformed`, `malformed_files`, `paths`; `config_dict()["issues"]`;
+  `serve(config=...)`.
+- Additive frame keys: `message_id` on `content` / `chunk` frames (vscode#108); real `duration_ms`
+  on `tool_end` / chunk `tool_result` (web#160); chunk `tool_result` siblings `id`, `name`,
+  `tool_status`, `duration_ms`; `outcome` (`complete` | `interrupted`) on the terminal `complete`
+  frame (#152).
+
+### Changed
+- Relative paths from TOML resolve to absolute paths in `HostConfig` (visible in `--show-config`).
+  In the global `~/.langstage/config.toml`, relative paths resolve against `~/.langstage/`; use
+  `~/...` or an absolute path there.
+- A failed tool no longer emits an `extraction` frame; repeated one-shot calls on a bare graph
+  without a checkpointer no longer share state.
+
+### Docs
+- README frame reference for both wires (#169).
+
 ## [1.0.35] - 2026-09-23
 
 ### Fixed
