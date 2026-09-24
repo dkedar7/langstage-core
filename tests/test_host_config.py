@@ -46,7 +46,8 @@ class TestResolveLayers:
     def test_toml_layer(self, isolated_global, tmp_path):
         _toml(tmp_path, '[agent]\nspec = "x.py:graph"\n[server]\nport = 7000\n')
         cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
-        assert cfg.agent_spec == "x.py:graph"
+        # A relative file spec from TOML resolves against the toml's own dir (gh cli #132).
+        assert cfg.agent_spec == f"{tmp_path.resolve() / 'x.py'}:graph"
         assert cfg.port == 7000
         assert cfg.sources["agent_spec"].startswith("toml")
 
@@ -473,7 +474,7 @@ class TestTomlValueTypes:
                         "[jupyter]\nexecute_timeout = 45.5\n")
         cfg = NumericHost.resolve(env={}, toml_start=tmp_path)
         assert cfg.port == 7000
-        assert cfg.agent_spec == "x.py:graph"
+        assert cfg.agent_spec == f"{tmp_path.resolve() / 'x.py'}:graph"
         assert cfg.execute_timeout == 45.5
         assert "ignoring malformed" not in capsys.readouterr().err
 

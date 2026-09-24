@@ -82,7 +82,7 @@ def apply_workspace(root, *, chdir: bool = False) -> "Workspace":
     # *into* the workspace (cli / the web app's _enter_workspace) would make every
     # subsequent workspace_root() re-resolve "./ws" against the new cwd and double
     # it to ws/ws — splitting the agent's cwd from the file browser root (#66).
-    ws = Workspace(Path(root).resolve()).ensure()
+    ws = Workspace(Path(root).expanduser().resolve()).ensure()
     _ACTIVE = ws
     resolved = str(ws.root)
     os.environ[_ENV_CANONICAL] = resolved

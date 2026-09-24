@@ -31,6 +31,8 @@ from dataclasses import MISSING, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Callable, ClassVar
 
+from .loader import is_file_spec, parse_agent_spec
+
 try:  # tomllib is stdlib on 3.11+; fall back to tomli; else the TOML layer is skipped.
     import tomllib as _tomllib
 except ModuleNotFoundError:  # pragma: no cover - 3.10 path
@@ -420,6 +422,17 @@ class HostConfig:
     _VALIDATORS: ClassVar[dict[str, Callable[[Any], Any]]] = {
         "port": _port_in_range,
     }
+    # field -> kind ("spec" | "path") for values that name a file or directory. A
+    # relative one from a TOML file resolves against THAT FILE's directory (like a path
+    # in pyproject.toml / tsconfig.json), so a walked-up project resolves identically
+    # from any subdirectory; env / override values stay relative to the cwd ("where you
+    # typed it"). A leading ``~`` is expanded from every source. Merged across the MRO
+    # so a subclass can register its own path keys. (gh langstage-cli #132 #133,
+    # langstage-vscode #123 #125 #126)
+    _TOML_PATHS: ClassVar[dict[str, str]] = {
+        "agent_spec": "spec",
+        "workspace_root": "path",
+    }
 
     # ---- map collection across the subclass MRO ----
 
@@ -435,6 +448,13 @@ class HostConfig:
         merged: dict[str, Callable[[Any], Any]] = {}
         for klass in reversed(cls.__mro__):
             merged.update(getattr(klass, "_VALIDATORS", {}))
+        return merged
+
+    @classmethod
+    def _toml_paths_map(cls) -> dict[str, str]:
+        merged: dict[str, str] = {}
+        for klass in reversed(cls.__mro__):
+            merged.update(getattr(klass, "_TOML_PATHS", {}))
         return merged
 
     @classmethod
@@ -482,9 +502,11 @@ class HostConfig:
         env_map = cls._env_map()
         toml_map = cls._toml_map()
         validators = cls._validators_map()
+        path_kinds = cls._toml_paths_map()
 
         values: dict[str, Any] = {}
         sources: dict[str, str] = {}
+        toml_dirs: dict[str, Path] = {}
         for f in fields(cls):
             name = f.name
             if f.default is not MISSING:
@@ -494,6 +516,7 @@ class HostConfig:
             else:
                 val = None
             src = "default"
+            toml_dir: Path | None = None
             default_val = val  # the built-in default; the degrade target for an invalid resolved value (gh #123)
 
             tkey = toml_map.get(name)
@@ -518,8 +541,10 @@ class HostConfig:
                         )
                         if winner is not None:
                             src = f"toml ({winner.name})"
+                            toml_dir = winner.parent
                         elif toml_paths:
                             src = f"toml ({toml_paths[-1].name})"
+                            toml_dir = toml_paths[-1].parent
                         else:
                             src = "toml"
 
@@ -554,6 +579,13 @@ class HostConfig:
                 val = overrides[name]
                 src = "override"
 
+            kind = path_kinds.get(name)
+            if kind is not None and val is not None:
+                base = toml_dir if src.startswith("toml") else None
+                val = _normalize_path_value(kind, val, base)
+                if base is not None:
+                    toml_dirs[name] = base
+
             validator = validators.get(name)
             if validator is not None and val is not None:
                 try:
@@ -574,6 +606,7 @@ class HostConfig:
         obj._sources = sources           # type: ignore[attr-defined]
         obj._toml_paths = toml_paths     # type: ignore[attr-defined]
         obj._toml_data = toml_data       # type: ignore[attr-defined]  # for unknown_toml_keys()
+        obj._toml_dirs = toml_dirs       # type: ignore[attr-defined]  # for toml_dir_for()
         return obj
 
     def merge(self, **overrides: Any) -> "HostConfig":
@@ -588,6 +621,17 @@ class HostConfig:
     def sources(self) -> dict[str, str]:
         """Per-field origin from the last ``resolve()`` (field -> source)."""
         return getattr(self, "_sources", {})
+
+    def toml_dir_for(self, field_name: str) -> Path | None:
+        """Directory of the TOML file ``field_name``'s value came from, else ``None``.
+
+        A relative file-path spec / workspace root from TOML is already rebased onto
+        this directory by :meth:`resolve`. A dotted ``module:attr`` spec can't be
+        rebased in the string, so pass this as ``load_agent_spec(..., base_dir=...)``
+        to import a project-local package relative to the ``langstage.toml`` that
+        named it. ``None`` for values from env / overrides / defaults (cwd-relative).
+        """
+        return getattr(self, "_toml_dirs", {}).get(field_name)
 
     def unknown_toml_keys(self) -> list[str]:
         """Dotted keys present in the loaded TOML file(s) that map to no config field.
@@ -728,6 +772,42 @@ class HostConfig:
 
 
 _NUMERIC_TYPES: dict[str, type] = {"int": int, "float": float}
+
+
+def _normalize_path_value(kind: str, value: Any, base: Path | None) -> Any:
+    """Expand ``~`` in a path-valued field and, when ``base`` is given (the value came
+    from a TOML file), resolve a relative path against it. See ``HostConfig._TOML_PATHS``.
+
+    ``kind == "spec"``: only the file half of a ``file.py:attr`` spec is touched; a dotted
+    ``module:attr`` spec (and a malformed one, left for the loader to reject with its
+    clear message) passes through, whitespace-stripped.
+    """
+    if kind == "spec":
+        if not isinstance(value, str):
+            return value
+        spec = value.strip()
+        try:
+            module_path, obj_name = parse_agent_spec(spec)
+        except ValueError:
+            return spec
+        if not is_file_spec(module_path):
+            return spec
+        file_path = Path(module_path).expanduser()
+        if base is not None and not file_path.anchor:
+            file_path = base / file_path
+        elif file_path == Path(module_path):
+            return spec  # untouched: keep the user's exact spelling
+        return f"{file_path}:{obj_name}"
+    # kind == "path"
+    if not isinstance(value, (str, os.PathLike)):
+        return value
+    path = Path(value)
+    expanded = path.expanduser()
+    # ``anchor``, not ``is_absolute()``: a drive-less rooted "/tmp/ws" on Windows is
+    # not relative to the toml file either.
+    if base is not None and not expanded.anchor:
+        return base / expanded
+    return expanded if expanded != path else value
 
 
 def _numeric_field_type(f: Any) -> type | None:

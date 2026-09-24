@@ -51,9 +51,9 @@ class TestLoadAgentSpec:
         # rpartition(':') must split on the final colon so drive letters
         # like C:\... in a path still resolve the object name correctly.
         agent_file = tmp_path / "win_agent.py"
-        agent_file.write_text("graph = 'ok'\n")
+        agent_file.write_text("graph = {'ok': 1}\n")
         loaded = load_agent_spec(f"{agent_file}:graph")
-        assert loaded == "ok"
+        assert loaded == {"ok": 1}
 
 
 # ── HostConfig ───────────────────────────────────────────────────────
