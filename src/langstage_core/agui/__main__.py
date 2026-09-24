@@ -12,6 +12,7 @@ still honoured).
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 # The keyless built-in demos, keyed by the value of --demo. Bare `--demo` selects
 # "echo" (the plain token echo stub, unchanged); `--demo=tools` selects the rich
@@ -31,19 +32,21 @@ def _exit_code_for(outcome: str) -> int:
     return {"complete": 0, "error": 1, "interrupted": 2}.get(outcome, 1)
 
 
-def _run_message(graph: Any, message: str, *, as_json: bool) -> int:
+def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None) -> int:
     """Run ONE turn against ``graph`` with ``message`` and print the reply (gh #120).
 
     Streams text to stdout over the shipped chunk wire (``iter_chunk_frames``) for the
     human path; ``--json`` prints the typed ``TurnResult`` for scripting. Exit code
-    mirrors the turn outcome via :func:`_exit_code_for`.
+    mirrors the turn outcome via :func:`_exit_code_for`. ``config`` is forwarded to
+    ``build_agent`` (the ``langstage.toml`` ``[configurable]`` table, gh #170).
     """
     import asyncio
 
+    from ..console import safe_write
     from . import build_agent, iter_chunk_frames
     from .collect import collect_chunk_frames
 
-    agent = build_agent(graph)
+    agent = build_agent(graph, config=config)
 
     if as_json:
         import json
@@ -69,8 +72,9 @@ def _run_message(graph: Any, message: str, *, as_json: bool) -> int:
         async for chunk in iter_chunk_frames(agent, message, "oneshot"):
             status = chunk.get("status")
             if status == "streaming" and "chunk" in chunk:
-                sys.stdout.write(chunk["chunk"])
-                sys.stdout.flush()
+                # Model text is arbitrary Unicode: escape what the console can't
+                # encode instead of crashing mid-reply on cp1252 (gh #153).
+                safe_write(chunk["chunk"], flush=True)
                 wrote_text = True
             elif status == "interrupt":
                 outcome = "interrupted"
@@ -192,28 +196,37 @@ def main(argv: list[str] | None = None) -> int:
         overrides["agent_spec"] = args.agent
 
     cfg = HostConfig.resolve(overrides=overrides)
+    # The [configurable] table is forwarded to the graph on the serve and --message
+    # paths below and shown by --show-config, instead of being reserved-but-inert
+    # (gh #170). An empty/absent table means no config, exactly as before.
+    configurable = cfg.configurable()
+    run_config = {"configurable": configurable} if configurable else None
+
+    from ..console import safe_print
 
     if args.show_config:
-        # The AG-UI server consumes only agent_spec/host/port. Drop the inherited
-        # workspace_root/debug/title rows so --show-config doesn't advertise env
-        # vars that have no effect on this surface (same omit_keys treatment the
-        # stdio sidecar and JupyterLab launcher already use). (gh #39)
-        omit = ["workspace_root", "debug", "title"]
+        # The AG-UI server consumes agent_spec/host/port, and debug (it gates the
+        # traceback on error frames, gh #137). Drop the inherited workspace_root/title
+        # rows so --show-config doesn't advertise env vars that have no effect on this
+        # surface (same omit_keys treatment the stdio sidecar and JupyterLab launcher
+        # already use). (gh #39)
+        omit = ["workspace_root", "title"]
         if args.as_json:
             # --show-config --json emits the machine-readable config_dict (the structured
             # twin of describe) instead of silently ignoring --json and printing the human
             # table — so a CI/tooling consumer gets JSON, not scraped brackets. (gh #125)
             import json
 
-            cd = cfg.config_dict(omit_keys=omit)
+            cd = cfg.config_dict(omit_keys=omit, configurable=configurable)
             if args.demo:
                 cd["demo"] = {"agent_spec": DEMO_SPECS[args.demo]}
             print(json.dumps(cd, default=str))
             return 0
-        described = cfg.describe(omit_keys=omit)
+        described = cfg.describe(omit_keys=omit, configurable=configurable)
         if args.demo:
             described += f"\n  demo: agent_spec resolves to {DEMO_SPECS[args.demo]}"
-        print(described)
+        # Values are user-controlled (a CJK spec path, ...): never crash on cp1252 (gh #171).
+        safe_print(described)
         return 0
 
     spec: str | None = DEMO_SPECS[args.demo] if args.demo else cfg.agent_spec
@@ -298,15 +311,15 @@ def main(argv: list[str] | None = None) -> int:
     # server. A thin wrapper over the shipped chunk wire; exit code mirrors the turn
     # outcome (complete=0 / error=1 / interrupted=2), consistent with --verify. (gh #120)
     if args.message is not None:
-        return _run_message(graph, args.message, as_json=args.as_json)
+        return _run_message(graph, args.message, as_json=args.as_json, config=run_config)
 
     name = args.name or (DEMO_NAMES[args.demo] if args.demo else DEFAULT_AGENT_NAME)
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
-    print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
+    safe_print(f"Serving {spec!r} over AG-UI at http://{cfg.host}:{cfg.port}{args.path}")
     # Pass the loaded graph, not the spec: serve() accepts either, and handing it
     # the graph keeps the module from being imported (and its side effects run) twice.
-    serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name)
+    serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config)
     return 0
 
 

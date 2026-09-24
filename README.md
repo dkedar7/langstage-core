@@ -232,6 +232,18 @@ The same resolution chain everywhere — defaults < `langstage.toml` < `LANGSTAG
 python -m langstage_core.host      # or each surface's --show-config
 ```
 
+What the diagnostic tells you:
+
+- **Every contributing file.** `TOML read from:` lists the global `~/.langstage/config.toml` and the project `langstage.toml`; `config_dict()["toml"]["paths"]` is the same list as data.
+- **A malformed file is reported as malformed, not missing.** A `langstage.toml` that doesn't parse is ignored entirely (every key falls back to env/defaults) and shows as `TOML: <path> is MALFORMED and was ignored entirely (<parse error>)`. In `config_dict()` it appears as `toml.found: true`, `toml.malformed: true`, and `toml.malformed_files: [{path, error}]`.
+- **Anything ignored or degraded, as data.** `HostConfig.config_issues()` (and `config_dict()["issues"]`) lists each malformed file, each wrong-type or invalid value that fell back to a default, and each unknown key. An empty list means the config is clean, so a surface's `--strict` gate can fail when the list isn't empty.
+- **`debug` is a top-level key.** In TOML, `debug = true` must come *before* the first `[table]` header. Written below `[server]`, TOML reads it as `server.debug`. That key is ignored, and a `note:` saying so is printed at startup.
+- **Booleans** accept `true`/`false`, `0`/`1`, and the same quoted strings as env vars (`"yes"`, `"off"`, ...). An unrecognized value falls back to the default and prints a `note:`.
+- **`[configurable]`** keys are passed to the graph's `config["configurable"]` by `langstage-agui` (for both serving and `--message`), and `--show-config` lists them. `thread_id` is always set per run. Python callers pass `build_agent(config=...)` themselves.
+- **Legacy names** (`DEEPAGENT_*`, `DEEPAGENTS_CONFIG_HOME`, `deepagents.toml`) each print exactly one `note:` per process. Set `LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1` to silence them.
+
+Surfaces print user-controlled values, so they should print through `langstage_core.console.safe_print` / `safe_write`. These escape characters the console can't encode (a cp1252 Windows console, for example) instead of raising `UnicodeEncodeError`.
+
 ### Agent specs and relative paths
 
 A spec is `path/to/file.py:attr` or `package.module:attr`. The `:attr` suffix is **required**: a colon-less spec is an error, never a silent fallback to a default agent. Surrounding whitespace is ignored and a leading `~` is expanded. The attribute must be the agent object itself: a `str` attribute is rejected, not followed as another spec. `load_agent_spec` imports like `python my_agent.py` does:

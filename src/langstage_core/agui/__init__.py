@@ -239,6 +239,7 @@ def serve(
     path: str = "/",
     name: str = DEFAULT_AGENT_NAME,
     description: str | None = None,
+    config: Any = None,
 ) -> None:
     """Load an agent (if given a spec string) and serve it over AG-UI.
 
@@ -246,6 +247,10 @@ def serve(
     ``path/to/file.py:attr`` — resolved via the host layer's
     :func:`~langstage_core.host.load_agent_spec`) or an already
     compiled graph. Blocks running a uvicorn server.
+
+    ``config`` is forwarded to :func:`build_agent` (e.g. ``{"configurable": {...}}``);
+    ``langstage-agui`` passes the ``langstage.toml`` ``[configurable]`` table here
+    (gh #170).
     """
     if isinstance(spec_or_graph, str):
         from ..host import load_agent_spec  # the host layer feeds AG-UI
@@ -253,7 +258,7 @@ def serve(
         graph = load_agent_spec(spec_or_graph)
     else:
         graph = spec_or_graph
-    app = build_app(graph, path=path, name=name, description=description)
+    app = build_app(graph, path=path, name=name, description=description, config=config)
     try:
         import uvicorn
     except ImportError as e:  # pragma: no cover
@@ -535,15 +540,32 @@ def _terminal_outcome(*, saw_interrupt: bool, saw_error: bool) -> str:
     return "complete"
 
 
+def _debug_enabled() -> bool:
+    """The resolved ``debug`` setting; never raises (it runs while reporting an error)."""
+    try:
+        from ..host import HostConfig
+
+        return bool(HostConfig.resolve().debug)
+    except Exception:  # noqa: BLE001 - a config problem must not mask the agent's error
+        import os
+
+        return os.getenv("LANGSTAGE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _debug_traceback_extra() -> dict:
     """When ``LANGSTAGE_DEBUG`` is enabled, carry the active exception's traceback in the
     terminal ``error`` frame so a surface's ``--traceback`` / debug mode can show WHERE the
     agent crashed, not just ``Type: message`` (gh langstage-vscode #83). Off by default —
     the frame is byte-identical unless debug is explicitly on, so normal output stays clean.
-    """
-    import os
 
-    if os.getenv("LANGSTAGE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+    "Enabled" is the RESOLVED ``debug`` (``HostConfig``: ``LANGSTAGE_DEBUG``, legacy
+    ``DEEPAGENT_DEBUG``, or ``debug = true`` in ``langstage.toml``), not a raw read of
+    the canonical env var — which silently ignored two of the three advertised ways to
+    turn it on (gh #137). Resolved per call (only on the error path, so it's cheap) so a
+    surface that sets ``LANGSTAGE_DEBUG`` at runtime (e.g. a ``--traceback`` flag) is
+    still honored.
+    """
+    if _debug_enabled():
         import traceback
 
         tb = traceback.format_exc()

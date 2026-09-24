@@ -79,14 +79,15 @@ def test_demo_rejects_unknown_value(capsys):
 
 
 def test_show_config_omits_keys_the_server_ignores(capsys):
-    # The AG-UI server consumes only agent_spec/host/port; workspace_root/debug/
-    # title are inherited but inert on this surface, so --show-config must not
-    # advertise them (gh #39).
+    # The AG-UI server consumes agent_spec/host/port and debug (it gates the error-frame
+    # traceback, gh #137); workspace_root/title are inherited but inert on this surface,
+    # so --show-config must not advertise them (gh #39).
     rc = main(["--show-config"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "agent_spec" in out and "host" in out and "port" in out
-    for inert in ("workspace_root", "debug", "title", "LANGSTAGE_TITLE", "LANGSTAGE_DEBUG"):
+    assert "debug" in out and "LANGSTAGE_DEBUG" in out
+    for inert in ("workspace_root", "title", "LANGSTAGE_TITLE"):
         assert inert not in out, inert
 
 
