@@ -24,8 +24,11 @@ Example (delegate-and-walk-away — enqueue, then read the result off the board)
 
         task_id = await runner.enqueue(title="research", prompt="Summarize the plan.")
 
-        # poll the board until the task reaches a terminal state
+        # poll the board until the task reaches a terminal state; a HITL agent parks
+        # at review_needed (NOT terminal) until runner.resume() answers it (gh #166)
         while (task := await runner.store.get(task_id))["state"] not in TERMINAL_STATES:
+            if task["state"] == "review_needed":
+                await runner.resume(task_id, [{"type": "approve"}])
             await asyncio.sleep(0.1)
 
         print(task["state"])    # 'done'
@@ -37,7 +40,8 @@ Example (delegate-and-walk-away — enqueue, then read the result off the board)
 A ``Task`` is a ``TypedDict`` — read it with ``task["state"]`` / ``task["result"]``
 (not attribute access). States flow
 ``queued -> ongoing -> review_needed -> done | failed | cancelled``;
-``TERMINAL_STATES`` is the set to stop polling on.
+``TERMINAL_STATES`` is the set to stop polling on. ``review_needed`` is not in it: a
+task paused on an interrupt waits for :meth:`TaskRunner.resume`.
 """
 from __future__ import annotations
 

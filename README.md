@@ -29,7 +29,7 @@ The shared core behind the **[LangStage](https://github.com/dkedar7/langstage) f
 pip install "langstage-core[agui]"
 ```
 
-The `[agui]` extra pulls the AG-UI runtime (`ag-ui-langgraph[fastapi]` + `uvicorn`) — needed for the streaming bridge below and by every LangStage surface. The bare `pip install langstage-core` (only `langchain-core`) is enough if you just want the host/config/tasks layer without streaming.
+The `[agui]` extra pulls the AG-UI runtime (`ag-ui-langgraph[fastapi]` + `uvicorn`) — needed for the streaming bridge below and by every LangStage surface. The bare `pip install langstage-core` (only `langchain-core`) covers the host/config layer only (`load_agent_spec`, `HostConfig`, the resume helpers). The task engine needs `[agui]` too: `SessionAdapter` drives every task through the AG-UI bridge, so on a bare install each task ends `failed`.
 
 No agent of your own yet? The `[stub]` extra adds a keyless echo graph you can stream:
 
@@ -133,13 +133,13 @@ result.outcome       # 'complete'   ('interrupted' on "ask me", 'error' on a fai
 The demos above are keyless. To stream your own model-backed agent, bring any LangGraph `CompiledGraph` — nothing about the library is demo-specific. The `[real]` extra pulls a lightweight OpenAI-compatible stack:
 
 ```bash
-pip install "langstage-core[agui,real]"   # langchain-openai + langgraph
+pip install "langstage-core[agui,real]"   # langchain-openai + langchain + langgraph
 ```
 
 ```python
 import asyncio, os
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
 from langstage_core.agui import build_agent, iter_event_frames
 
 # Works with OpenAI, OpenRouter, or any OpenAI-compatible endpoint:
@@ -148,7 +148,7 @@ model = ChatOpenAI(
     base_url=os.environ.get("OPENAI_BASE_URL"),   # e.g. https://openrouter.ai/api/v1
     api_key=os.environ["OPENAI_API_KEY"],
 )
-agent = build_agent(create_react_agent(model, tools=[]))
+agent = build_agent(create_agent(model, tools=[]))
 
 async def main():
     async for frame in iter_event_frames(agent, "Say hi in one word.", thread_id="s1"):
@@ -158,26 +158,31 @@ async def main():
 asyncio.run(main())
 ```
 
-Everything else — `run_turn`, `serve`, the task engine, extractors — takes the same `build_agent(...)` agent, so the keyless snippets above work verbatim against a real model once you swap the graph. (Prefer Anthropic + the full agent stack? `pip install deepagents langchain-anthropic` and build a `deepagents` graph instead; the library only ever sees a `CompiledGraph`.)
+Everything else — `run_turn`, `serve`, the task engine, extractors — takes the same `build_agent(...)` agent, so the keyless snippets above work verbatim against a real model once you swap the graph. (`create_agent` is LangChain 1.x's agent builder; LangGraph's `create_react_agent` is deprecated since LangGraph 1.0.) (Prefer Anthropic + the full agent stack? `pip install deepagents langchain-anthropic` and build a `deepagents` graph instead; the library only ever sees a `CompiledGraph`.)
 
 ### Delegate work to a background task
 
-The task engine is a single-process worker pool: enqueue a prompt, walk away, and read the result off the board when it's done. Any `CompiledGraph` drives the workers.
+The task engine is a single-process worker pool: enqueue a prompt, walk away, and read the result off the board when it's done. Any `CompiledGraph` drives the workers (install `[agui]`: the workers run on the AG-UI bridge).
 
 ```python
 import asyncio
-from langstage_core import SessionAdapter, load_agent_spec
-from langstage_core.tasks import TaskRunner, InMemoryTaskStore, TERMINAL_STATES
+from langstage_core import SessionAdapter
+from langstage_core.demo.tools import create_tool_demo_agent
+from langstage_core.tasks import REVIEW_NEEDED, TERMINAL_STATES, InMemoryTaskStore, TaskRunner
 
 async def main():
-    adapter = SessionAdapter(graph=load_agent_spec("langstage_core.demo.stub:graph"))
+    adapter = SessionAdapter(graph=create_tool_demo_agent())   # keyless; "ask me" interrupts
     runner = TaskRunner(adapter, InMemoryTaskStore(), concurrency=3)
     await runner.start()
 
-    task_id = await runner.enqueue(title="research", prompt="Summarize the plan.")
+    task_id = await runner.enqueue(title="research", prompt="ask me first")
 
-    # delegate-and-walk-away: poll the board until the task reaches a terminal state
+    # Poll until the task is terminal. A HITL agent parks at review_needed, which is
+    # NOT terminal: nothing moves it on until a human answers with runner.resume().
     while (task := await runner.store.get(task_id))["state"] not in TERMINAL_STATES:
+        if task["state"] == REVIEW_NEEDED:
+            print(task["interrupt"]["allowed_decisions"])       # ['respond', 'approve']
+            await runner.resume(task_id, [{"type": "approve"}])  # a bare list of decisions
         await asyncio.sleep(0.1)
 
     print(task["state"])    # 'done'
@@ -187,7 +192,16 @@ async def main():
 asyncio.run(main())
 ```
 
-A `Task` is a `TypedDict` — read it with `task["state"]` / `task["result"]` / `task["error"]` / `task["interrupt"]`, not attribute access. States flow `queued → ongoing → review_needed → done | failed | cancelled`; `TERMINAL_STATES` is the set to stop polling on. `TASK_TOOLS` (with `set_runner` / `get_runner`) are the agent-facing delegation tools, so an agent can enqueue background work to copies of itself.
+A `Task` is a `TypedDict` — read it with `task["state"]` / `task["result"]` / `task["error"]` / `task["interrupt"]`, not attribute access. States flow `queued → ongoing → review_needed → done | failed | cancelled`. `TERMINAL_STATES` (`done` / `failed` / `cancelled`) is the set to stop polling on, but a task only gets there unattended if its agent never interrupts: `review_needed` waits for a human, so a loop that only checks `TERMINAL_STATES` spins forever on a HITL agent. Handle it as above, or stop polling at `review_needed` and resume later.
+
+Driving a task after `enqueue` (each returns `False` when the task isn't in a state that allows it):
+
+- `await runner.resume(task_id, decisions)`: answer a `review_needed` task. `decisions` is the decision list (`[{"type": "approve"}]`); the `{"decisions": [...]}` envelope is accepted too.
+- `await runner.followup(task_id, message)`: continue a finished (`done` / `failed` / `cancelled`) task's thread with a new message.
+- `await runner.retry(task_id)`: re-run a `failed` or `cancelled` task.
+- `await runner.cancel(task_id)`: stop a queued or running task.
+
+`TASK_TOOLS` (with `set_runner` / `get_runner`) are the agent-facing delegation tools, so an agent can enqueue background work to copies of itself.
 
 ### Human-in-the-loop (interrupt → resume)
 
@@ -205,9 +219,29 @@ async for frame in iter_event_frames(agent, "", thread_id="s1",
     ...
 ```
 
-Decision types: `approve`, `reject`, `edit`, `respond` (deepagents 0.6+ / LangGraph 1.1+).
+**Decision verbs.** Core uses one vocabulary, LangChain's `HumanInTheLoopMiddleware` verbs:
 
-`frame["allowed_decisions"]` is the interrupt's **own** decision set, not a fixed list: a standard HumanInterrupt's `config` (`allow_accept` → `approve`, `allow_edit` → `edit`, `allow_respond` → `respond`, `allow_ignore` → `reject`) or a HumanInTheLoopMiddleware payload's per-action `review_configs[*].allowed_decisions` decide it, so an approve-only interrupt advertises exactly `["approve"]`. The full four are the fallback only when the interrupt says nothing.
+| Core advertises (`allowed_decisions`) | Legacy LangGraph `HumanInterrupt` equivalent | Accepted on resume as an alias |
+|---|---|---|
+| `approve` | `allow_accept` / `accept` | `accept` |
+| `edit` | `allow_edit` / `edit` | none (same word) |
+| `reject` | `allow_ignore` / `ignore` | `ignore` |
+| `respond` | `allow_respond` / `response` | `response` |
+
+- **Advertised:** `frame["allowed_decisions"]` is the interrupt's **own** decision set, always in the left-hand vocabulary. A HumanInTheLoopMiddleware payload's per-action `review_configs[*].allowed_decisions` or a legacy HumanInterrupt's `config` (mapped by the table) decide it, so an approve-only interrupt advertises exactly `["approve"]`. All four are the fallback only when the interrupt says nothing.
+- **Accepted:** the helpers below take either vocabulary, in any case. On `resume=` to a HumanInTheLoopMiddleware request, a decision `type` may be the canonical verb or its alias.
+- **Translated:** when the pending interrupt is a HumanInTheLoopMiddleware request (an `action_requests` payload), core rewrites each alias in the `{"decisions": [...]}` envelope to its canonical verb, which is what the middleware reads (it raises on `accept`). Any other interrupt, such as a legacy HumanInterrupt list or your own `interrupt(...)`, gets the payload verbatim, because that graph reads its own vocabulary. The envelope itself is never reshaped.
+
+Core does not refuse a disallowed verb on resume; the surface should, before it resumes. `normalize_decision` / `is_allowed_decision` (top-level) check a verb against the pending interrupt, aliases included; `DECISION_VERBS` and `DECISION_ALIASES` hold the table:
+
+```python
+from langstage_core import is_allowed_decision, normalize_decision
+
+allowed = ["reject", "approve"]                 # frame["allowed_decisions"]
+normalize_decision("accept", allowed)           # 'approve'  (alias -> canonical)
+normalize_decision("edit", allowed)             # None       (not allowed here: refuse it)
+is_allowed_decision("ignore", allowed)          # True       (ignore == reject)
+```
 
 `resume=` takes the raw payload or a `create_resume_input(...)` `Command`. On `ag-ui-langgraph` ≥ 0.0.43 it is sent on the adapter's standard `RunAgentInput.resume[]` (answering the thread's pending interrupt), so a resume logs no `forwardedProps.command.resume is deprecated` / `failed to parse … resume_input as JSON` warning; older adapters, or a thread with several pending interrupts, keep the legacy `forwarded_props.command.resume` wire.
 
@@ -220,9 +254,9 @@ Everything is re-exported from the top-level `langstage_core` package (except th
 | **Host** | `load_agent_spec`, `HostConfig`, `Workspace` | Load a graph from a `module:attr` / `file.py:attr` spec; resolve layered config (defaults < `langstage.toml` < `LANGSTAGE_*` env < overrides). |
 | **AG-UI bridge** (`langstage_core.agui`) | `build_agent`, `iter_event_frames`, `iter_chunk_frames`, `collect_event_frames` / `collect_chunk_frames` / `run_turn` (→ `TurnResult`), `build_app`, `serve`, `add_agui_endpoint` | Stream any `CompiledGraph` in-process (the `iter_*` mappings), collect one turn into a typed `TurnResult` (the `collect_*` / `run_turn` one-shots), or serve it as an AG-UI HTTP endpoint. |
 | **Session adapter** (top-level; also `langstage_core.adapters`) | `SessionAdapter`, `Session` | A session-scoped driver over the AG-UI agent with a typed terminal `outcome` — the streaming engine behind the web app + task board. |
-| **Input helpers** | `prepare_agent_input`, `create_resume_input` | Build graph input from a message (+ optional context) or a resume decision. |
+| **Input helpers** | `prepare_agent_input`, `create_resume_input`, `normalize_decision`, `is_allowed_decision` | Build graph input from a message (+ optional context) or a resume decision; check a decision verb against an interrupt's `allowed_decisions`. |
 | **Extractors** | `ToolExtractor` + built-ins (`ThinkToolExtractor`, `TodoExtractor`, `DisplayInlineExtractor`, `SkillManageExtractor`, `MemoryExtractor`, …) | Turn a tool's result into a structured `extraction` frame; pass `extractors=[...]` to the `iter_*` mappings. |
-| **Task engine** | `TaskRunner`, `TaskStore`, `InMemoryTaskStore`, `TASK_TOOLS`, `set_runner`, `get_runner` | Async delegate-and-walk-away worker pool + a persistence-agnostic store Protocol; `TASK_TOOLS` are the agent-facing delegation tools. |
+| **Task engine** | `TaskRunner`, `TaskStore`, `InMemoryTaskStore`, `TASK_TOOLS`, `set_runner`, `get_runner` | Async delegate-and-walk-away worker pool (`enqueue`, `resume`, `followup`, `retry`, `cancel`) + a persistence-agnostic store Protocol; `TASK_TOOLS` are the agent-facing delegation tools. |
 
 ## Serve any agent over AG-UI
 
@@ -245,15 +279,32 @@ from langstage_core.agui import build_app
 app = build_app(my_compiled_graph)   # an ASGI (FastAPI) app; run with uvicorn
 ```
 
+**Browser frontends on another origin (CORS).** The server sends no CORS headers by default, so only same-origin pages and non-browser clients can call it. A frontend dev server on another port (`http://localhost:5173` calling `http://localhost:8050`) needs an opt-in allowlist:
+
+```bash
+langstage-agui --demo=tools --cors                          # any localhost / 127.0.0.1 / [::1] origin
+langstage-agui --demo=tools --cors http://localhost:5173    # exactly these origins (comma-separated)
+```
+
+```python
+app = build_app(my_compiled_graph, cors_origins=["https://app.example.com"])   # or "loopback"
+serve(my_compiled_graph, cors_origins="loopback")
+```
+
+`"*"` is honored only if you pass it explicitly; it is never a default. Credentials (cookies) are not allowed cross-origin.
+
 See [ADR 0001](docs/adr/0001-adopt-ag-ui-for-the-wire.md) for the rationale.
 
 ## Configuration
 
-The same resolution chain everywhere — defaults < `langstage.toml` < `LANGSTAGE_*` env < CLI/overrides (legacy `deepagents.toml` / `DEEPAGENT_*` still resolve as a deprecated fallback). Print the resolved value + source of every key:
+The same resolution chain everywhere — defaults < `langstage.toml` < `LANGSTAGE_*` env < CLI/overrides (legacy `deepagents.toml` / `DEEPAGENT_*` still resolve as a deprecated fallback). Print the resolved value + source of every shared key:
 
 ```bash
-python -m langstage_core.host      # or each surface's --show-config
+python -m langstage_core.host      # every shared key
+langstage-agui --show-config       # each surface's --show-config: the keys that surface uses
 ```
+
+A surface's `--show-config` leaves out keys it ignores, and says so on a `(not used by this surface, so not shown: ...)` line. `langstage-agui` omits `workspace_root` and `title`; `--show-config --json` lists them under `omitted`.
 
 What the diagnostic tells you:
 
@@ -261,6 +312,7 @@ What the diagnostic tells you:
 - **A malformed file is reported as malformed, not missing.** A `langstage.toml` that doesn't parse is ignored entirely (every key falls back to env/defaults) and shows as `TOML: <path> is MALFORMED and was ignored entirely (<parse error>)`. In `config_dict()` it appears as `toml.found: true`, `toml.malformed: true`, and `toml.malformed_files: [{path, error}]`.
 - **Anything ignored or degraded, as data.** `HostConfig.config_issues()` (and `config_dict()["issues"]`) lists each malformed file, each wrong-type or invalid value that fell back to a default, and each unknown key. An empty list means the config is clean, so a surface's `--strict` gate can fail when the list isn't empty.
 - **`debug` is a top-level key.** In TOML, `debug = true` must come *before* the first `[table]` header. Written below `[server]`, TOML reads it as `server.debug`. That key is ignored, and a `note:` saying so is printed at startup.
+- **A rejected value falls back one layer, not to the default.** A value that fails a check (an out-of-range `LANGSTAGE_PORT`, say) is ignored with a `note:`, and the next layer down is used: the `langstage.toml` value if one is set, else the default.
 - **Booleans** accept `true`/`false`, `0`/`1`, and the same quoted strings as env vars (`"yes"`, `"off"`, ...). An unrecognized value falls back to the default and prints a `note:`.
 - **`[configurable]`** keys are passed to the graph's `config["configurable"]` by `langstage-agui` (for both serving and `--message`), and `--show-config` lists them. `thread_id` is always set per run. Python callers pass `build_agent(config=...)` themselves.
 - **Legacy names** (`DEEPAGENT_*`, `DEEPAGENTS_CONFIG_HOME`, `deepagents.toml`) each print exactly one `note:` per process. Set `LANGSTAGE_SUPPRESS_LEGACY_NOTICE=1` to silence them.

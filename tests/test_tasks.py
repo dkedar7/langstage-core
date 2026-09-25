@@ -262,6 +262,26 @@ class TestRunnerEndToEnd:
         finally:
             await runner.shutdown()
 
+    async def test_resume_accepts_the_envelope_and_rejects_garbage(self):
+        # gh #166: the streaming resume= shape ({"decisions": [...]}) used to be
+        # double-wrapped into {'decisions': {'decisions': [...]}} with no error.
+        graph = interrupt_graph()
+        adapter = SessionAdapter(graph=graph)
+        store = InMemoryTaskStore()
+        runner = TaskRunner(adapter, store, concurrency=1, poll_interval=0.05)
+        await runner.start()
+        try:
+            tid = await runner.enqueue(title="hitl", prompt="run it")
+            await _wait_state(store, tid, REVIEW_NEEDED)
+            with pytest.raises(TypeError, match="list of decision dicts"):
+                await runner.resume(tid, "approve")
+            assert (await store.get(tid))["state"] == REVIEW_NEEDED  # untouched
+            assert await runner.resume(tid, {"decisions": [{"type": "approve"}]}) is True
+            row = await _wait_state(store, tid, DONE)
+            assert row["result"] == "approved: {'decisions': [{'type': 'approve'}]}"
+        finally:
+            await runner.shutdown()
+
 
 # ── 4. Runner controls (no workers needed for pure transitions) ──────
 

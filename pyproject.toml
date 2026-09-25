@@ -1,6 +1,6 @@
 [project]
 name = "langstage-core"
-version = "1.0.36"
+version = "1.0.37"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}
@@ -62,6 +62,9 @@ agui = [
 ]
 real = [
     "langchain-openai>=0.2",
+    # The README's real-model snippet imports `langchain.agents.create_agent` (gh #151);
+    # declare it rather than relying on langchain-openai pulling it in transitively.
+    "langchain>=1.0",
     "langgraph>=1.1.0",
 ]
 dev = [
@@ -75,6 +78,9 @@ dev = [
     "httpx>=0.25",
     "ag-ui-langgraph[fastapi]>=0.0.41",
     "uvicorn>=0.30",
+    # The async SQLite checkpointer the web app uses: node attribution must not depend
+    # on when its write lands (gh #188).
+    "langgraph-checkpoint-sqlite>=2.0",
 ]
 
 [project.scripts]

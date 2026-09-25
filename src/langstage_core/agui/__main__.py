@@ -160,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--path", default="/", help="Endpoint path (default '/').")
     parser.add_argument("--name", default=None, help="Agent display name for AG-UI clients.")
     parser.add_argument(
+        "--cors",
+        nargs="?",
+        const="loopback",
+        default=None,
+        metavar="ORIGIN[,ORIGIN...]",
+        help="Allow a browser frontend on another origin (CORS; off by default). Bare "
+        "--cors allows any localhost origin; or list origins, e.g. "
+        "--cors http://localhost:5173. '*' only if you pass it explicitly.",
+    )
+    parser.add_argument(
         "--show-config",
         action="store_true",
         help="Print the resolved host config and exit.",
@@ -365,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     # the graph keeps the module from being imported (and its side effects run) twice.
     try:
         serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config,
-              sock=sock)
+              sock=sock, cors_origins=args.cors)
     finally:
         sock.close()
     return 0

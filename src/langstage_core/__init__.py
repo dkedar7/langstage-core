@@ -43,7 +43,14 @@ from .host import (
     load_agent_spec,
     workspace_root,
 )
-from .resume import create_resume_input, prepare_agent_input
+from .resume import (
+    DECISION_ALIASES,
+    DECISION_VERBS,
+    create_resume_input,
+    is_allowed_decision,
+    normalize_decision,
+    prepare_agent_input,
+)
 from .tasks import (
     InMemoryTaskStore,
     TASK_TOOLS,
@@ -75,6 +82,11 @@ __all__ = [
     # Input helpers
     "prepare_agent_input",
     "create_resume_input",
+    # HITL decision verbs: canonical set, legacy aliases, validation
+    "DECISION_VERBS",
+    "DECISION_ALIASES",
+    "normalize_decision",
+    "is_allowed_decision",
     # Extractors (ToolExtractor protocol + reusable built-ins)
     "ToolExtractor",
     "ThinkToolExtractor",

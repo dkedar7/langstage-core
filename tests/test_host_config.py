@@ -725,3 +725,66 @@ class TestValidators:
     def test_valid_port_kept(self, isolated_global, tmp_path):
         cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "9000"}, toml_start=tmp_path)
         assert cfg.port == 9000 and cfg.sources["port"] == "env:LANGSTAGE_PORT"
+
+
+class TestValidatorFallsBackToTheLayerBeneath:
+    """gh #189: a validator failure on a HIGHER layer falls back to the valid layer
+    beneath it (the langstage.toml value), not to the built-in default -- the validator
+    sibling of the caster rule (langstage-jupyter #83) -- and says so in the note."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_note_dedupe(self):
+        import langstage_core.host.config as config_mod
+
+        config_mod._warned_invalid_value.clear()
+        yield
+        config_mod._warned_invalid_value.clear()
+
+    def test_invalid_env_keeps_the_valid_toml_value(self, isolated_global, tmp_path, capsys):
+        _toml(tmp_path, "[server]\nport = 7000\n")
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "70000"}, toml_start=tmp_path)
+        assert cfg.port == 7000
+        assert cfg.sources["port"].startswith("toml")
+        err = capsys.readouterr().err
+        assert "note: ignoring invalid port=70000" in err
+        assert "using 7000 (toml (" in err
+        [issue] = [i for i in cfg.config_issues() if i["field"] == "port"]
+        assert issue["kind"] == "invalid_value"
+        assert issue["source"] == "env:LANGSTAGE_PORT" and issue["used"] == 7000
+
+    def test_invalid_override_keeps_the_env_value(self, isolated_global, tmp_path):
+        cfg = HostConfig.resolve(env={"LANGSTAGE_PORT": "9000"}, overrides={"port": 0},
+                                 toml_start=tmp_path)
+        assert cfg.port == 9000 and cfg.sources["port"] == "env:LANGSTAGE_PORT"
+
+    def test_subclass_validator_issue_repro(self, isolated_global, tmp_path, capsys):
+        # The bare-core repro from the issue (a jupyter-style execute_timeout > 0).
+        from dataclasses import dataclass
+        from typing import ClassVar
+
+        def _pos(v):
+            v = float(v)
+            if not v > 0:
+                raise ValueError(f"must be > 0, got {v}")
+            return v
+
+        @dataclass
+        class C(HostConfig):
+            execute_timeout: float = 300.0
+            _ENV: ClassVar[dict] = {"execute_timeout": ("DEEPAGENT_EXECUTE_TIMEOUT", float)}
+            _TOML: ClassVar[dict] = {"execute_timeout": "jupyter.execute_timeout"}
+            _VALIDATORS: ClassVar[dict] = {"execute_timeout": _pos}
+
+        _toml(tmp_path, "[jupyter]\nexecute_timeout = 50\n")
+        cfg = C.resolve(env={"LANGSTAGE_EXECUTE_TIMEOUT": "0"}, toml_start=tmp_path)
+        assert cfg.execute_timeout == 50.0
+        assert cfg.sources["execute_timeout"].startswith("toml (")
+        assert "using 50.0 (toml (" in capsys.readouterr().err
+
+    def test_invalid_toml_with_no_lower_layer_still_uses_the_default(
+        self, isolated_global, tmp_path, capsys
+    ):
+        _toml(tmp_path, "[server]\nport = 99999\n")
+        cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
+        assert cfg.port == 8050 and cfg.sources["port"] == "default"
+        assert "using default 8050 instead." in capsys.readouterr().err

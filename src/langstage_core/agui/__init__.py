@@ -296,6 +296,37 @@ def add_agui_endpoint(
     return app
 
 
+#: ``cors_origins="loopback"``: any http(s) origin on this machine, any port.
+LOOPBACK_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+
+
+def _cors_kwargs(cors_origins: Any) -> dict | None:
+    """``CORSMiddleware`` kwargs for ``cors_origins``, or ``None`` for no CORS (gh #162).
+
+    ``None`` / ``False`` / empty: no CORS headers at all (same-origin only, the
+    default). ``"loopback"`` / ``True``: any ``localhost`` / ``127.0.0.1`` / ``[::1]``
+    origin on any port (a local dev frontend such as ``http://localhost:5173``).
+    Otherwise an explicit allowlist: a list of origins, or one comma-separated string.
+    ``"*"`` is honored only when passed explicitly; it is never a default.
+    """
+    if cors_origins is None or cors_origins is False:
+        return None
+    if cors_origins is True:
+        cors_origins = "loopback"
+    if isinstance(cors_origins, str):
+        cors_origins = [o for o in (x.strip() for x in cors_origins.split(",")) if o]
+    origins = [str(o).strip().rstrip("/") for o in cors_origins if str(o).strip()]
+    if not origins:
+        return None
+    base = {"allow_methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["*"],
+            "allow_credentials": False}
+    regex = None
+    if "loopback" in origins:
+        origins = [o for o in origins if o != "loopback"]
+        regex = LOOPBACK_ORIGIN_REGEX
+    return {**base, "allow_origins": origins, "allow_origin_regex": regex}
+
+
 def build_app(
     graph: Any,
     *,
@@ -304,17 +335,28 @@ def build_app(
     description: str | None = None,
     config: Any = None,
     title: str | None = None,
+    cors_origins: Any = None,
 ) -> Any:
     """Build a standalone FastAPI ASGI app exposing ``graph`` over AG-UI.
 
     Run it with any ASGI server, e.g. ``uvicorn.run(app, ...)`` — or just use
     :func:`serve`.
+
+    ``cors_origins`` opts in to CORS for a browser frontend on another origin
+    (gh #162). Off by default. ``"loopback"`` allows any localhost origin, a list (or a
+    comma-separated string) allows exactly those origins, and ``"*"`` is honored only
+    when passed explicitly.
     """
     try:
         from fastapi import FastAPI
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(_IMPORT_HINT) from e
     app = FastAPI(title=title or name)
+    cors = _cors_kwargs(cors_origins)
+    if cors is not None:
+        from starlette.middleware.cors import CORSMiddleware
+
+        app.add_middleware(CORSMiddleware, **cors)
     add_agui_endpoint(app, graph, path=path, name=name, description=description, config=config)
     return app
 
@@ -354,6 +396,7 @@ def serve(
     description: str | None = None,
     config: Any = None,
     sock: Any = None,
+    cors_origins: Any = None,
 ) -> None:
     """Load an agent (if given a spec string) and serve it over AG-UI.
 
@@ -371,6 +414,8 @@ def serve(
     process with code 3 (gh #143). Pass ``sock`` — an already-bound socket — to serve
     on it instead (the CLI binds first so its "Serving …" banner is never a false
     success); ``host`` / ``port`` are then only used for uvicorn's log line.
+
+    ``cors_origins`` is forwarded to :func:`build_app` (opt-in CORS, gh #162).
     """
     if isinstance(spec_or_graph, str):
         from ..host import load_agent_spec  # the host layer feeds AG-UI
@@ -378,7 +423,8 @@ def serve(
         graph = load_agent_spec(spec_or_graph)
     else:
         graph = spec_or_graph
-    app = build_app(graph, path=path, name=name, description=description, config=config)
+    app = build_app(graph, path=path, name=name, description=description, config=config,
+                    cors_origins=cors_origins)
     try:
         import uvicorn
     except ImportError as e:  # pragma: no cover
@@ -738,6 +784,69 @@ class _TurnStream:
         # ToolCallResultEvent has no status field, so the iter_* mappings read it here.
         self.errored_result_ids: set = set()
         self._pre_ids: set | None = None
+        # Which node PRODUCED each message / tool call, from the step's own update
+        # payload (gh #188). The checkpoint read in _flush can lag the step that wrote
+        # it (an async/durable saver under durability="async"), so a message may surface
+        # at a later step's flush; its frame must still name the node that made it,
+        # not whichever step is current when the late read finally sees it.
+        self._node_by_message: dict[str, str] = {}
+        self._node_by_call: dict[str, str] = {}
+
+    def node_of_message(self, message_id, default: str) -> str:
+        """The node that produced message ``message_id``, else ``default``."""
+        if message_id is None:
+            return default
+        return self._node_by_message.get(str(message_id), default)
+
+    def node_of_call(self, tool_call_id, default: str) -> str:
+        """The node whose message carried tool call ``tool_call_id``, else ``default``."""
+        if tool_call_id is None:
+            return default
+        return self._node_by_call.get(str(tool_call_id), default)
+
+    def _note_update(self, node, update) -> None:
+        """Record the producing ``node`` for every message in one node's state update."""
+        if not isinstance(node, str) or not node or node.startswith("__"):
+            return
+        for upd in update if isinstance(update, (list, tuple)) else (update,):
+            msgs = upd.get("messages") if isinstance(upd, dict) else None
+            if msgs is None:
+                continue
+            for m in msgs if isinstance(msgs, (list, tuple)) else (msgs,):
+                get = m.get if isinstance(m, dict) else (lambda k, _m=m: getattr(_m, k, None))
+                mid = get("id")
+                if mid is not None:
+                    self._node_by_message.setdefault(str(mid), node)
+                for tc in get("tool_calls") or ():
+                    tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    if tcid is not None:
+                        self._node_by_call.setdefault(str(tcid), node)
+
+    def _on_raw(self, raw) -> None:
+        """Read node attribution off the adapter's RawEvents (gh #188).
+
+        Two payloads carry it, both before the step's ``StepFinishedEvent``: the node's
+        own ``on_chain_end`` (``metadata.langgraph_node`` == the run's name; tool-call
+        ids are set, message ids usually not yet) and the graph's ``updates`` stream
+        chunk ``{node: update}`` (message ids as the checkpoint stores them).
+        """
+        if not isinstance(raw, dict):
+            return
+        kind = raw.get("event")
+        meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        node = meta.get("langgraph_node")
+        if kind == "on_chain_end" and node and raw.get("name") == node:
+            self._note_update(node, data.get("output"))
+        elif kind == "on_chain_stream" and not node:
+            chunk = data.get("chunk")
+            # ``(namespace, {node: update})`` with subgraphs=True; a bare dict without.
+            if isinstance(chunk, (list, tuple)) and len(chunk) == 2 and isinstance(chunk[1], dict):
+                chunk = chunk[1]
+            if isinstance(chunk, dict):
+                for name, update in chunk.items():
+                    if isinstance(update, dict):
+                        self._note_update(name, update)
 
     async def _checkpoint_messages(self):
         graph = getattr(self.agent, "graph", None)
@@ -832,7 +941,9 @@ class _TurnStream:
         try:
             async for ev in self.agent.run(self.run_input):
                 t = type(ev).__name__
-                if t in ("StepFinishedEvent", "MessagesSnapshotEvent", "RunErrorEvent"):
+                if t == "RawEvent":
+                    self._on_raw(getattr(ev, "event", None))
+                elif t in ("StepFinishedEvent", "MessagesSnapshotEvent", "RunErrorEvent"):
                     async for synth in self._flush():
                         yield synth
                 elif t in ("TextMessageStartEvent", "TextMessageContentEvent",
@@ -927,6 +1038,27 @@ class _ToolTracker:
         return is_error, self._duration_ms.pop(tool_call_id, None)
 
 
+def _normalize_extractors(extractors) -> tuple:
+    """Coerce the ``extractors=`` argument to a tuple (gh #178).
+
+    ``None`` means "no extractors" (like the ``()`` default) and a single extractor (an
+    object with ``tool_name`` + ``extract``) is wrapped, so neither natural input raises a
+    raw ``'NoneType' object is not iterable`` out of library internals. Anything else
+    that isn't iterable is a clear ``TypeError`` naming the argument.
+    """
+    if extractors is None:
+        return ()
+    if hasattr(extractors, "tool_name") and callable(getattr(extractors, "extract", None)):
+        return (extractors,)
+    try:
+        return tuple(extractors)
+    except TypeError:
+        raise TypeError(
+            "extractors= must be an iterable of ToolExtractor (or a single ToolExtractor, "
+            f"or None); got {type(extractors).__name__}"
+        ) from None
+
+
 def _unwrap_resume(resume):
     """Return the raw resume payload, accepting either the payload OR a langgraph
     ``Command`` built by :func:`create_resume_input`.
@@ -1017,8 +1149,25 @@ async def _resume_input_fields(agent, thread_id, resume) -> dict:
     """
     if resume is None:
         return {"forwarded_props": {}}
-    if _supports_agui_resume(agent):
+    pending = None
+    if isinstance(resume, dict) and isinstance(resume.get("decisions"), list):
+        # One decision vocabulary (vscode #114 / #117, see langstage_core.resume): when
+        # the thread is paused on a HumanInTheLoopMiddleware request (an
+        # ``action_requests`` payload), a legacy alias (accept / ignore / response) is
+        # rewritten to the canonical verb the middleware reads; it would otherwise
+        # raise on it. Any other interrupt (a legacy HumanInterrupt list, a custom
+        # ``interrupt(...)``) gets the payload verbatim: that graph reads its own words.
+        from ..resume import canonicalize_resume
+
         pending = await _pending_interrupts(agent, thread_id)
+        if pending and all(
+            isinstance(getattr(p, "value", None), dict) and "action_requests" in p.value
+            for p in pending
+        ):
+            resume = canonicalize_resume(resume)
+    if _supports_agui_resume(agent):
+        if pending is None:
+            pending = await _pending_interrupts(agent, thread_id)
         interrupt_id = getattr(pending[0], "id", None) if len(pending) == 1 else None
         if interrupt_id:
             from ag_ui.core.types import ResumeEntry
@@ -1222,6 +1371,7 @@ async def iter_event_frames(
     # sentinel (GenericToolExtractor) is the fallback, applied to any tool without a
     # dedicated extractor — otherwise "*" is just a dict key no real tool matches, so
     # the documented public fallback is dead code on the 1.0 wire (gh #90).
+    extractors = _normalize_extractors(extractors)  # None / a single extractor (gh #178)
     by_tool = {e.tool_name: e for e in extractors if getattr(e, "tool_name", None) != "*"}
     default_extractor = next(
         (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
@@ -1304,8 +1454,10 @@ async def iter_event_frames(
                 # two content frames is a message boundary, e.g. two nodes' finished
                 # replies, which consumers join with a paragraph break instead of gluing
                 # them into one line (gh langstage-vscode #108).
+                # node: the node that PRODUCED the message, which a late checkpoint
+                # write can separate from the current step (gh #188).
                 yield {"type": "content", "content": ev.delta, "role": "assistant",
-                       "node": current_node, "message_id": mid}
+                       "node": stream.node_of_message(mid, current_node), "message_id": mid}
             elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
                 # Reasoning-model chain-of-thought (Anthropic extended thinking, o-series,
                 # DeepSeek R1, Qwen, xAI, ...). Surface it as the advertised `reasoning`
@@ -1332,7 +1484,7 @@ async def iter_event_frames(
                     "id": ev.tool_call_id,
                     "name": tool_names.get(ev.tool_call_id, "tool"),
                     "args": args,
-                    "node": current_node,
+                    "node": stream.node_of_call(ev.tool_call_id, current_node),
                 }
             elif t == "ToolCallResultEvent":
                 streamed_result_ids.add(ev.tool_call_id)
@@ -1404,13 +1556,15 @@ async def iter_event_frames(
                 ):
                     if item["kind"] == "content":
                         yield {"type": "content", "content": item["text"],
-                               "role": "assistant", "node": item["node"],
+                               "role": "assistant",
+                               "node": stream.node_of_message(item["id"], item["node"]),
                                "message_id": item["id"]}
                     elif item["kind"] == "tool_call":
                         # A snapshot tool call reconstructs the streaming tool_start;
                         # its result arrives as a separate tool message -> tool_end below.
                         yield {"type": "tool_start", "id": item["id"], "name": item["name"],
-                               "args": item["args"], "node": current_node}
+                               "args": item["args"],
+                               "node": stream.node_of_call(item["id"], current_node)}
                     elif item["kind"] == "tool_result":
                         result = _truncate_result(str(item["raw"]), max_result_len)
                         is_error, duration_ms = tools.result(item["id"], item["name"], item["error"])
@@ -1502,6 +1656,7 @@ async def iter_chunk_frames(
     # Dispatch extractors by tool name, with a "*"-tool_name extractor
     # (GenericToolExtractor) as the fallback — the same scheme iter_event_frames uses,
     # so `extractors=[...]` behaves identically on both `iter_*` mappings (gh #90, #92).
+    extractors = _normalize_extractors(extractors)  # None / a single extractor (gh #178)
     by_tool = {e.tool_name: e for e in extractors if getattr(e, "tool_name", None) != "*"}
     default_extractor = next(
         (e for e in extractors if getattr(e, "tool_name", None) == "*"), None
@@ -1567,8 +1722,8 @@ async def iter_chunk_frames(
                 if mid is not None:
                     streamed_ids.add(mid)
                 # message_id marks message boundaries, as on the event wire (vscode #108).
-                yield {"status": "streaming", "chunk": ev.delta, "node": current_node,
-                       "message_id": mid}
+                yield {"status": "streaming", "chunk": ev.delta,
+                       "node": stream.node_of_message(mid, current_node), "message_id": mid}
             elif t in ("ReasoningMessageContentEvent", "ThinkingTextMessageContentEvent"):
                 # Reasoning-model chain-of-thought on the chunk wire — a distinct
                 # `reasoning` key (parallel to `chunk`) so renderers can style/collapse
@@ -1664,7 +1819,8 @@ async def iter_chunk_frames(
                     full_text_by_id=full_text_by_id,
                 ):
                     if item["kind"] == "content":
-                        yield {"status": "streaming", "chunk": item["text"], "node": item["node"],
+                        yield {"status": "streaming", "chunk": item["text"],
+                               "node": stream.node_of_message(item["id"], item["node"]),
                                "message_id": item["id"]}
                     elif item["kind"] == "tool_call":
                         yield {"status": "streaming",
