@@ -90,14 +90,17 @@ def test_demo_rejects_unknown_value(capsys):
 def test_show_config_omits_keys_the_server_ignores(capsys):
     # The AG-UI server consumes agent_spec/host/port and debug (it gates the error-frame
     # traceback, gh #137); workspace_root/title are inherited but inert on this surface,
-    # so --show-config must not advertise them (gh #39).
+    # so --show-config must not advertise them as rows (gh #39) -- only name them on the
+    # "not used by this surface" line (gh #145).
     rc = main(["--show-config"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "agent_spec" in out and "host" in out and "port" in out
     assert "debug" in out and "LANGSTAGE_DEBUG" in out
-    for inert in ("workspace_root", "title", "LANGSTAGE_TITLE"):
-        assert inert not in out, inert
+    rows = [ln for ln in out.splitlines() if " = " in ln]
+    for inert in ("workspace_root", "title"):
+        assert not any(ln.split()[0] == inert for ln in rows), inert
+    assert "LANGSTAGE_TITLE" not in out and "LANGSTAGE_WORKSPACE_ROOT" not in out
 
 
 class TestInvalidSpecFailsBeforeBanner:
@@ -413,3 +416,30 @@ class TestPortInUseFailsBeforeBanner:
                 agui_pkg.serve(graph, host="127.0.0.1", port=holder.getsockname()[1])
         finally:
             holder.close()
+
+
+class TestShowConfigNamesOmittedKeys:
+    """gh #145: --show-config drops workspace_root/title (the agui surface ignores them,
+    gh #39) but used to do so silently, while the README called it an "every key" audit."""
+
+    def test_text_footer_names_the_omitted_keys(self, capsys, monkeypatch):
+        monkeypatch.setenv("LANGSTAGE_TITLE", "MyApp")
+        assert main(["--show-config"]) == 0
+        out = capsys.readouterr().out
+        assert "(not used by this surface, so not shown: workspace_root, title)" in out
+        assert "MyApp" not in out
+
+    def test_json_lists_omitted(self, capsys):
+        import json
+
+        assert main(["--show-config", "--json"]) == 0
+        cd = json.loads(capsys.readouterr().out)
+        assert cd["omitted"] == ["workspace_root", "title"]
+        assert "workspace_root" not in cd["config"]
+
+    def test_host_diagnostic_has_no_footer(self):
+        from langstage_core.host import HostConfig
+
+        described = HostConfig.resolve(env={}, use_toml=False).describe()
+        assert "not used by this surface" not in described
+        assert "omitted" not in HostConfig.resolve(env={}, use_toml=False).config_dict()

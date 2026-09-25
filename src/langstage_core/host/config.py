@@ -459,8 +459,9 @@ class HostConfig:
     _TOML_PASSTHROUGH: ClassVar[tuple[str, ...]] = ("configurable",)
     # field -> validator(value) -> value, raising ValueError/TypeError on a value that
     # coerced to the right TYPE but is semantically invalid (e.g. an out-of-range port).
-    # resolve() degrades a rejected value to the field default + note, like a malformed
-    # numeric value. Merged across the MRO so a subclass can add its own. (gh langstage #123)
+    # resolve() validates each layer, so a rejected value degrades to the valid layer
+    # beneath it (else the field default) + note, like a malformed numeric value (#189).
+    # Merged across the MRO so a subclass can add its own. (gh langstage #123)
     _VALIDATORS: ClassVar[dict[str, Callable[[Any], Any]]] = {
         "port": _port_in_range,
     }
@@ -563,14 +564,46 @@ class HostConfig:
                 val = None
             src = "default"
             toml_dir: Path | None = None
-            default_val = val  # the built-in default; the degrade target for an invalid resolved value (gh #123)
+            kind = path_kinds.get(name)
+            validator = validators.get(name)
+
+            def _accept(cand: Any, cand_src: str, cand_dir: Path | None = None,
+                        *, name=name, kind=kind, validator=validator) -> None:
+                """Normalize + validate ONE layer's value and make it current, unless the
+                validator rejects it. Validation runs per layer, so a rejected higher
+                layer (a bad env var) falls back to the valid layer beneath it (the
+                langstage.toml value), not to the built-in default: the validator sibling
+                of the caster rule (gh #189, langstage-jupyter #83)."""
+                nonlocal val, src, toml_dir
+                if kind is not None and cand is not None:
+                    cand = _normalize_path_value(kind, cand, cand_dir)
+                if validator is not None and cand is not None:
+                    try:
+                        cand = validator(cand)
+                    except (ValueError, TypeError) as exc:
+                        # Coerced to the right TYPE but semantically invalid (an
+                        # out-of-range PORT, which uvicorn would silently mask to 16
+                        # bits). Degrade to the layer beneath + note, never a silent
+                        # misbind, and keep that layer's source so --show-config can't
+                        # present the rejected value as a live setting (gh langstage
+                        # #123, #189).
+                        if cand_src == "default":
+                            return  # an invalid built-in default is kept as-is
+                        _warn_invalid_value(name, cand, exc, val, src)
+                        value_issues.append(_value_issue(
+                            "invalid_value", name, cand_src, cand, exc, val
+                        ))
+                        return
+                val, src, toml_dir = cand, cand_src, cand_dir
+
+            _accept(val, "default")
 
             tkey = toml_map.get(name)
             if tkey is not None:
                 tv = _get_dotted(toml_data, tkey)
                 if tv is not None:
                     try:
-                        val = _coerce(f, tv)
+                        coerced = _coerce(f, tv)
                     except (ValueError, TypeError) as exc:
                         # An uncoercible value keeps the default AND the "default"
                         # source, so --show-config can never present an unusable
@@ -589,13 +622,11 @@ class HostConfig:
                             None,
                         )
                         if winner is not None:
-                            src = f"toml ({winner.name})"
-                            toml_dir = winner.parent
+                            _accept(coerced, f"toml ({winner.name})", winner.parent)
                         elif toml_paths:
-                            src = f"toml ({toml_paths[-1].name})"
-                            toml_dir = toml_paths[-1].parent
+                            _accept(coerced, f"toml ({toml_paths[-1].name})", toml_paths[-1].parent)
                         else:
-                            src = "toml"
+                            _accept(coerced, "toml")
 
             if name in env_map:
                 var, caster = env_map[name]
@@ -609,8 +640,7 @@ class HostConfig:
                         _warn_legacy_env(legacy, canonical)
                 if ev is not None and ev != "":
                     try:
-                        val = caster(ev)
-                        src = f"env:{used}"
+                        cast = caster(ev)
                     except (ValueError, TypeError) as exc:
                         # A malformed numeric env var (LANGSTAGE_PORT=abc, an
                         # unexpanded "$PORT", a stray "8050 x") used to raise an
@@ -626,33 +656,14 @@ class HostConfig:
                         value_issues.append(_value_issue(
                             "malformed_value", name, f"env:{used}", ev, exc, val
                         ))
+                    else:
+                        _accept(cast, f"env:{used}")
 
             if name in overrides:
-                val = overrides[name]
-                src = "override"
+                _accept(overrides[name], "override")
 
-            kind = path_kinds.get(name)
-            if kind is not None and val is not None:
-                base = toml_dir if src.startswith("toml") else None
-                val = _normalize_path_value(kind, val, base)
-                if base is not None:
-                    toml_dirs[name] = base
-
-            validator = validators.get(name)
-            if validator is not None and val is not None:
-                try:
-                    val = validator(val)
-                except (ValueError, TypeError) as exc:
-                    # Coerced to the right TYPE but semantically invalid (an in-range int
-                    # that's an out-of-range PORT, which uvicorn would silently mask to 16
-                    # bits). Degrade to the default + note — never a silent misbind — and
-                    # reset the source so --show-config can't present the rejected value as
-                    # a live setting (gh langstage #123).
-                    _warn_invalid_value(name, val, exc, default_val)
-                    value_issues.append(_value_issue(
-                        "invalid_value", name, src, val, exc, default_val
-                    ))
-                    val, src = default_val, "default"
+            if kind is not None and toml_dir is not None and src.startswith("toml"):
+                toml_dirs[name] = toml_dir
 
             values[name] = val
             sources[name] = src
@@ -898,6 +909,9 @@ class HostConfig:
             "unknown_keys": self.unknown_toml_keys(),
         }
         out = {"config": config, "toml": toml_block, "issues": self.config_issues()}
+        omitted = [f.name for f in fields(self) if f.name in omit]
+        if omitted:
+            out["omitted"] = omitted  # keys this surface doesn't use (gh #145)
         if configurable is not None:
             out["configurable"] = dict(configurable)
         return out
@@ -947,6 +961,11 @@ class HostConfig:
                 hints.append(f"toml: {toml_map[f.name]}")
             hint = f"   ({', '.join(hints)})" if hints else ""
             lines.append(f"  {f.name:<16} = {str(value):<26} [{origin}]{hint}")
+        hidden = [f.name for f in fields(self) if f.name in omit]
+        if hidden:
+            # Say which keys this surface left out, so a LANGSTAGE_* var the user set
+            # doesn't just vanish from the audit (gh #145). ASCII-only (cp1252-safe).
+            lines.append(f"  (not used by this surface, so not shown: {', '.join(hidden)})")
         toml_paths = getattr(self, "_toml_paths", [])
         malformed = self.malformed_toml()
         lines.append("")
@@ -1165,22 +1184,26 @@ def _warn_malformed_env_value(
     )
 
 
-def _warn_invalid_value(field: str, value: Any, exc: Exception, default: Any) -> None:
-    """One-line stderr note when a resolved value coerced fine but failed a validator.
+def _warn_invalid_value(
+    field: str, value: Any, exc: Exception, kept: Any, kept_src: str = "default"
+) -> None:
+    """One-line stderr note when a layer's value coerced fine but failed a validator.
 
     The semantic-validation counterpart of :func:`_warn_malformed_env_value` (gh langstage
-    #123: an out-of-range port). Degrades to the field default (validation runs after all
-    layers, so there's no lower layer to fall back to). ASCII-only so it can't crash a
-    cp1252 Windows console. Deduped so several ``resolve()`` calls in one process don't
-    repeat it.
+    #123: an out-of-range port). Validation runs per layer, so the rejected value falls
+    back to the valid layer beneath it (the ``langstage.toml`` value under a bad env var,
+    not the built-in default; gh #189), and the note names that value and its source,
+    like the caster note. ASCII-only so it can't crash a cp1252 Windows console. Deduped
+    so several ``resolve()`` calls in one process don't repeat it.
     """
     dedupe = (field, str(value))
     if dedupe in _warned_invalid_value:
         return
     _warned_invalid_value.add(dedupe)
+    kept_desc = f"default {kept!r}" if kept_src == "default" else f"{kept!r} ({kept_src})"
     print(
         f"note: ignoring invalid {field}={value!r} "
-        f"({type(exc).__name__}: {exc}); using default {default!r} instead.",
+        f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
         file=sys.stderr,
     )
 

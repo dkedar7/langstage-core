@@ -134,3 +134,94 @@ def prepare_agent_input(
 
     # Should never reach here
     raise ValueError("Invalid input")
+
+
+# ── Decision verbs (HITL) ──────────────────────────────────────────────
+#
+# ONE canonical vocabulary (gh langstage-vscode #114 / #117):
+#
+# - Core ADVERTISES LangChain's HumanInTheLoopMiddleware verbs -- ``approve``, ``edit``,
+#   ``reject``, ``respond`` -- in every ``interrupt`` frame's ``allowed_decisions``. A
+#   legacy LangGraph ``HumanInterrupt`` (deprecated since LangGraph 1.0) is mapped onto
+#   them from its ``config``: ``allow_accept`` -> approve, ``allow_edit`` -> edit,
+#   ``allow_respond`` -> respond, ``allow_ignore`` -> reject.
+# - Core ACCEPTS the legacy ``HumanResponse`` verbs as aliases on resume and in these
+#   helpers: ``accept`` -> approve, ``ignore`` -> reject, ``response`` -> respond
+#   (``edit`` is the same word in both).
+# - Core TRANSLATES to the graph only where the graph needs it: when the pending
+#   interrupt is a HumanInTheLoopMiddleware request (an ``action_requests`` payload),
+#   each alias in the ``{"decisions": [...]}`` envelope is rewritten to its canonical
+#   verb (the middleware raises on ``accept``). Any other interrupt -- a legacy
+#   ``HumanInterrupt`` list, a custom ``interrupt(...)`` -- receives the payload
+#   verbatim, because that graph reads its own vocabulary. The envelope shape is never
+#   changed.
+
+DECISION_VERBS: tuple[str, ...] = ("approve", "edit", "reject", "respond")
+"""The canonical decision verbs core advertises in ``allowed_decisions``."""
+
+DECISION_ALIASES: dict[str, str] = {"accept": "approve", "ignore": "reject", "response": "respond"}
+"""Legacy LangGraph ``HumanResponse`` verbs -> the canonical verb they mean."""
+
+
+def _canonical(verb: Any) -> str | None:
+    if not isinstance(verb, str):
+        return None
+    v = verb.strip().lower()
+    if not v:
+        return None
+    return DECISION_ALIASES.get(v, v)
+
+
+def normalize_decision(verb: Any, allowed: Any = None) -> str | None:
+    """The canonical decision verb for ``verb``, or ``None`` if it isn't allowed.
+
+    ``verb`` may be canonical (``approve`` / ``edit`` / ``reject`` / ``respond``) or a
+    legacy alias (``accept`` / ``ignore`` / ``response``), in any case. ``allowed`` is an
+    interrupt frame's ``allowed_decisions`` (either vocabulary); pass ``None`` to check
+    only that ``verb`` is a known decision. A verb outside the canonical four is accepted
+    only when ``allowed`` lists it (a custom verb a graph advertises itself).
+
+    Surfaces use this to validate a user's decision against the pending interrupt
+    before resuming::
+
+        verb = normalize_decision("accept", frame["allowed_decisions"])  # -> "approve"
+        if verb is None:
+            ...  # refuse: not a decision this interrupt allows
+    """
+    canon = _canonical(verb)
+    if canon is None:
+        return None
+    if allowed is None:
+        return canon if canon in DECISION_VERBS else None
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    permitted = {_canonical(a) for a in allowed}
+    return canon if canon in permitted else None
+
+
+def is_allowed_decision(verb: Any, allowed: Any) -> bool:
+    """``True`` when ``verb`` (canonical or alias) is in ``allowed`` (either vocabulary)."""
+    return normalize_decision(verb, allowed) is not None
+
+
+def canonicalize_resume(resume: Any) -> Any:
+    """Rewrite legacy-alias decision ``type``s in a ``{"decisions": [...]}`` resume
+    payload to the canonical verbs (a copy; the input is not mutated).
+
+    Anything else -- a bare value, a non-envelope dict, a decision with an unknown
+    ``type`` -- is returned unchanged. ``iter_event_frames`` / ``iter_chunk_frames``
+    apply this to a ``resume=`` answering a HumanInTheLoopMiddleware request, so an
+    ``accept`` reaches the middleware as the ``approve`` it understands.
+    """
+    if not isinstance(resume, dict) or not isinstance(resume.get("decisions"), list):
+        return resume
+    out = []
+    changed = False
+    for d in resume["decisions"]:
+        if isinstance(d, dict) and isinstance(d.get("type"), str):
+            canon = _canonical(d["type"])
+            if canon in DECISION_VERBS and canon != d["type"]:
+                d = {**d, "type": canon}
+                changed = True
+        out.append(d)
+    return {**resume, "decisions": out} if changed else resume

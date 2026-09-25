@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.0.37] - 2026-09-25
+
+Wave 4 of the 2026-09 family sweep: two new core bugs, one canonical HITL decision
+vocabulary, and advertised-but-not-honored docs.
+
+### Fixed
+- **Node attribution with an async checkpointer.** A finished message's `node` (on `tool_start`,
+  `content` and chunk-wire text) comes from the step's own update payload, not from whichever step
+  is current when the checkpoint read sees it. With an `AsyncSqliteSaver` (the web app) and
+  LangGraph's default `durability="async"`, a tool call made by `agent` was labeled `tools` or
+  `final` (#188; web#173).
+- **Validator fallback.** A value that fails a validator (e.g. an out-of-range `LANGSTAGE_PORT`)
+  now falls back to the valid layer beneath it (the `langstage.toml` value) instead of the built-in
+  default, and the `note:` / `config_issues()` entry name that value and source, matching the
+  caster rule (#189; jupyter#83).
+- **`extractors=None` / a single extractor** are accepted by every `iter_*` / `collect_*` /
+  `run_turn` entry point and `SessionAdapter`; a non-iterable value is a clear `TypeError` naming
+  the argument instead of a raw one from library internals (#178).
+- **`TaskRunner.resume`** accepts the `{"decisions": [...]}` envelope as well as the bare list
+  (it used to double-wrap it into a garbage decision) and raises `TypeError` for anything else
+  (#166).
+
+### Added
+- **HITL decision verbs.** `normalize_decision(verb, allowed=None)`, `is_allowed_decision(verb,
+  allowed)`, `DECISION_VERBS` (`approve`, `edit`, `reject`, `respond`) and `DECISION_ALIASES`
+  (`accept` -> `approve`, `ignore` -> `reject`, `response` -> `respond`), top-level. Surfaces use
+  them to validate a verb against an interrupt's `allowed_decisions`, in either vocabulary. A
+  resume answering a HumanInTheLoopMiddleware request has its aliases rewritten to the canonical
+  verbs; any other interrupt gets the payload verbatim (vscode#114, #117).
+- **Opt-in CORS** (#162): `build_app(..., cors_origins=)`, `serve(..., cors_origins=)` and
+  `langstage-agui --cors [ORIGIN,...]`. Off by default. `"loopback"` (bare `--cors`) allows any
+  `localhost` / `127.0.0.1` / `[::1]` origin; a list allows exactly those origins; `"*"` only when
+  passed explicitly. No credentials.
+- `--show-config` names the keys a surface leaves out (`(not used by this surface, so not shown:
+  workspace_root, title)`), and `config_dict(omit_keys=...)` lists them under `omitted` (#145).
+- `[real]` declares `langchain>=1.0`; `[dev]` adds `langgraph-checkpoint-sqlite`.
+
+### Docs
+- README: a bare install covers the host/config layer only; the task engine needs `[agui]` (#138).
+- README: `--show-config` wording matches what each command prints (#145).
+- README "Connect a real model" uses `langchain.agents.create_agent` instead of the deprecated
+  `create_react_agent` (#151).
+- README task engine: the polling loop handles `review_needed` (it spun forever on a HITL agent),
+  and `resume` / `followup` / `retry` / `cancel` are documented (#166).
+- README HITL: the decision-verb table (advertised, accepted, translated) and the helpers.
+- README serving: the CORS opt-in.
+
 ## [1.0.36] - 2026-09-24
 
 Wave 2 of the 2026-09 family sweep: root causes that were filed separately in several

@@ -111,9 +111,12 @@ class SessionAdapter:
     ):
         self._graph = graph
         self._max_result_len = max_result_len
+        from ..agui import _normalize_extractors
+
         # Forwarded to iter_event_frames so the web/task-board surface can emit
-        # `extraction` frames too — parity with the iter_* surfaces (gh #96).
-        self._extractors = extractors
+        # `extraction` frames too — parity with the iter_* surfaces (gh #96). None / a
+        # single extractor are accepted; a non-iterable fails here, not mid-turn (#178).
+        self._extractors = _normalize_extractors(extractors)
         self._sessions: dict[str, Session] = {}
         # AG-UI-only since langstage-core 1.0 (ADR 0003): turns stream through the
         # in-process AG-UI adapter (``agui.iter_event_frames``) — the wrapped agent

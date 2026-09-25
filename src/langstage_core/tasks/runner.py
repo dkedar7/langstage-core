@@ -164,7 +164,19 @@ class TaskRunner:
         Flips the task back to ``ongoing`` and runs the resume in the
         background so the caller (an approve/reject HTTP handler) returns at
         once.
+
+        ``decisions`` is the decision list (``[{"type": "approve"}]``). The
+        ``{"decisions": [...]}`` envelope the streaming ``resume=`` takes is accepted
+        too; it used to be double-wrapped into a garbage decision (gh #166). Anything
+        else raises ``TypeError``.
         """
+        if isinstance(decisions, dict) and isinstance(decisions.get("decisions"), list):
+            decisions = decisions["decisions"]
+        if not isinstance(decisions, list):
+            raise TypeError(
+                "decisions must be a list of decision dicts, e.g. [{'type': 'approve'}]; "
+                f"got {type(decisions).__name__}"
+            )
         task = await self._store.get(task_id)
         if task is None or task.get("state") != REVIEW_NEEDED:
             return False
