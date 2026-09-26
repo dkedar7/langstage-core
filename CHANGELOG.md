@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.39] - 2026-09-26
+
+### Fixed
+- **The demo agents echo only what the user typed** (gh #192). `langstage_core.demo.stub` and
+  `demo.tools` echoed the whole last human message, so surface context showed up in `--demo`
+  replies: the web app's `[Current time: ...]` / `[Working directory: ...]` /
+  `[File browser folder: ...]` lines and JupyterLab's trailing `Current directory: ...` /
+  `Currently focused ...` block. Leading lines that are entirely `[...]` and that trailing
+  block are now dropped before echoing. `demo.tools` also routes its triggers (`think`,
+  `use a tool`, `ask me`) and builds the `demo_lookup` query from the typed text only, so a
+  workspace path containing a trigger word no longer changes the route.
+
 ## [1.0.38] - 2026-09-25
 
 One exit-code scheme for every LangStage command line ([ADR 0007](docs/adr/0007-family-exit-codes.md)):
