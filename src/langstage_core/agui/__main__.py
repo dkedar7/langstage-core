@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from ..cli import EXIT_FAIL, EXIT_OK, ArgumentParser, exit_code_for_outcome, usage_error
+
 # The keyless built-in demos, keyed by the value of --demo. Bare `--demo` selects
 # "echo" (the plain token echo stub, unchanged); `--demo=tools` selects the rich
 # demo that exercises every frame type — tool_start/tool_end/extraction/reasoning/
@@ -28,8 +30,8 @@ DEMO_NAMES = {"echo": "Demo Agent", "tools": "Tool Demo Agent"}
 
 def _exit_code_for(outcome: str) -> int:
     """The `--message` exit code from the turn outcome (gh #120): complete=0,
-    error=1, interrupted=2 — the same 0/1/2 vocabulary --verify / no-spec use."""
-    return {"complete": 0, "error": 1, "interrupted": 2}.get(outcome, 1)
+    error=1, interrupted=2 — the family scheme (ADR 0007)."""
+    return exit_code_for_outcome(outcome)
 
 
 def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None) -> int:
@@ -126,11 +128,13 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
 
 
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    parser = argparse.ArgumentParser(
+    # Usage errors exit 64, not argparse's 2 (which the family reserves for "paused on
+    # a HITL interrupt"). Exit codes: 0 ok / 1 failed / 2 paused / 64 usage (ADR 0007).
+    parser = ArgumentParser(
         prog="langstage-agui",
         description="Serve a LangGraph agent over the AG-UI protocol.",
+        epilog="Exit codes: 0 ok, 1 failed (no/bad agent, turn error, can't serve), "
+        "2 paused on a human-in-the-loop interrupt, 64 usage error.",
     )
     parser.add_argument(
         "--agent",
@@ -216,10 +220,8 @@ def main(argv: list[str] | None = None) -> int:
     from ..host import HostConfig
 
     if args.demo and args.agent:
-        print("error: --demo and --agent are mutually exclusive", file=sys.stderr)
-        # Command-aware like every other can't-run path below (gh #174): 2 is
-        # --message's "interrupted" and outside --verify's 0/1, so map it to 1 there.
-        return 1 if (args.verify or args.message is not None) else 2
+        # A usage error on every command (ADR 0007): 64, never 2 (== paused).
+        return usage_error(parser, "--demo and --agent are mutually exclusive")
 
     # CLI flags are overrides on the resolved config so --show-config and the actual
     # bind always agree (and env / langstage.toml host/port/agent work). --agent must
@@ -276,11 +278,10 @@ def main(argv: list[str] | None = None) -> int:
             "or add [agent].spec to langstage.toml",
             file=sys.stderr,
         )
-        # No spec is a "can't run" failure, same as a bad spec (#124) or a missing
-        # extra (#134): 1 under --verify (0/1) and --message (2 == interrupted). A bare
-        # 2 here let a CI gate read an unconfigured agent as a benign HITL pause —
-        # fail-open. The serve path keeps 2 (a can't-start usage error). (gh #174)
-        return 1 if (args.verify or args.message is not None) else 2
+        # No spec is a "can't run" failure on every command (ADR 0007). A bare 2 here
+        # let a CI gate read an unconfigured agent as a benign HITL pause — fail-open
+        # (gh #174).
+        return EXIT_FAIL
 
     from . import DEFAULT_AGENT_NAME, ensure_available, serve
 
@@ -291,11 +292,9 @@ def main(argv: list[str] | None = None) -> int:
         ensure_available()
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
-        # A missing [agui] extra is a "can't run" failure — under --verify (0 ok / 1
-        # failed) and --message (0/1/2, 2=interrupted) it must map to 1, never 2 (which
-        # --message reads as interrupted), exactly like the agent-load-failure path
-        # (gh #124). The serve path keeps 2 (a can't-start usage error). (gh #134)
-        return 1 if (args.verify or args.message is not None) else 2
+        # A missing [agui] extra is a "can't run" failure: 1 on every command, never
+        # 2 (== paused) (gh #134, ADR 0007).
+        return EXIT_FAIL
 
     # Resolve the spec BEFORE announcing success. serve() loads the spec itself, so
     # an unloadable one (typo'd module, missing attribute, nonexistent file — the
@@ -321,12 +320,9 @@ def main(argv: list[str] | None = None) -> int:
     # spec that resolved to a str (gh langstage-cli #149).
     except (ImportError, AttributeError, OSError, ValueError, TypeError) as exc:
         print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
-        # A load failure must respect the command's exit-code contract (gh #124):
-        # --verify is 0 ok / 1 failed and --message is 0/1/2 (2 == interrupted), so a
-        # load failure is a "failed"/"error" -> 1 there, never 2 (which --message reads
-        # as interrupted). The serve path keeps 2 — a can't-start usage error, like the
-        # no-spec and missing-[agui] siblings above.
-        return 1 if (args.verify or args.message is not None) else 2
+        # A load failure is a failure (1) on every command, never 2 (== paused)
+        # (gh #124, ADR 0007).
+        return EXIT_FAIL
 
     # --verify: the question every adopter asks right after --agent — "did it load
     # AND actually produce a turn?" — which --show-config can't answer (a spec that
@@ -357,9 +353,9 @@ def main(argv: list[str] | None = None) -> int:
     # Bind BEFORE the banner. A port already in use used to print the definitive
     # "Serving … at <url>" success line to stdout and only THEN have uvicorn log the
     # bind error and exit 3 — the false-green banner #100/#134 removed for the other
-    # can't-serve cases. Now it's the same clean one-line stderr error and the serve
-    # path's documented can't-start code (2), and the banner prints only once the port
-    # is actually held. (gh #143)
+    # can't-serve cases. Now it's the same clean one-line stderr error and the family
+    # can't-start code (1, ADR 0007), and the banner prints only once the port is
+    # actually held. (gh #143)
     from . import _bind_socket
 
     try:
@@ -367,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         reason = exc.strerror or str(exc)
         safe_print(f"error: cannot serve at {url}: {reason}", file=sys.stderr)
-        return 2
+        return EXIT_FAIL
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
     safe_print(f"Serving {spec!r} over AG-UI at {url}", flush=True)
@@ -378,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
               sock=sock, cors_origins=args.cors)
     finally:
         sock.close()
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

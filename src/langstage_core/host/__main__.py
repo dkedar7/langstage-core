@@ -6,8 +6,7 @@ where it resolved from (default / TOML / env / override), and the env var +
 variable names. Hosts can ship their own subclass printer for host-specific
 keys; this covers the shared core.
 """
-import argparse
-
+from ..cli import ArgumentParser
 from ..console import safe_print
 from .config import HostConfig
 
@@ -15,7 +14,8 @@ from .config import HostConfig
 def main(argv: list[str] | None = None) -> int:
     # A tiny parser so `-h/--help` works and unknown flags error, instead of
     # every arg (including --help) being a silent no-op (gh #-dogfood).
-    parser = argparse.ArgumentParser(
+    # Usage errors exit 64 (the family scheme, ADR 0007), not argparse's 2.
+    parser = ArgumentParser(
         prog="python -m langstage_core.host",
         description="Print the resolved shared host config (value, source, env/TOML key) and exit.",
     )

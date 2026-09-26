@@ -76,15 +76,16 @@ def test_demo_tools_show_config_resolves_tools_spec(capsys):
 
 def test_demo_tools_is_still_mutually_exclusive_with_agent(capsys):
     rc = main(["--demo=tools", "--agent", "my_agent.py:graph"])
-    assert rc == 2
+    assert rc == 64  # a usage error (ADR 0007)
     assert "mutually exclusive" in capsys.readouterr().err
 
 
 def test_demo_rejects_unknown_value(capsys):
-    # An unknown --demo value is an argparse error (SystemExit 2), not a silent fall-through.
+    # An unknown --demo value is an argparse usage error (SystemExit 64, ADR 0007), not a
+    # silent fall-through.
     with pytest.raises(SystemExit) as exc:
         main(["--demo=bogus"])
-    assert exc.value.code == 2
+    assert exc.value.code == 64
 
 
 def test_show_config_omits_keys_the_server_ignores(capsys):
@@ -141,7 +142,7 @@ class TestInvalidSpecFailsBeforeBanner:
         rc = main(["--agent", spec])
         captured = capsys.readouterr()
 
-        assert rc == 2, "must exit non-zero, matching the sibling error paths"
+        assert rc == 1, "a load failure is a failure (ADR 0007)"
         assert "error: could not load agent" in captured.err
         assert needle in captured.err
         assert "Traceback" not in captured.err, "the raw traceback must not leak"
@@ -155,7 +156,7 @@ class TestInvalidSpecFailsBeforeBanner:
         # required ':attr' suffix is missing — same clean treatment, no traceback.
         rc = main(["--agent", "myagent"])
         captured = capsys.readouterr()
-        assert rc == 2
+        assert rc == 1
         assert "error: could not load agent" in captured.err
         assert "Serving" not in captured.out
         assert stub_serve == []
@@ -258,12 +259,12 @@ class TestShowConfigJsonAndExitCodes:
 
     def test_load_failure_exit_code_respects_command(self, capsys):
         # gh #124: a failed load is "failed"/"error" (exit 1) under --verify / --message,
-        # never 2 (which --message reads as interrupted); the serve path keeps 2.
+        # never 2 (which --message reads as interrupted); the serve path too (ADR 0007).
         assert main(["--agent", "/nope/x.py:graph", "--verify"]) == 1
         capsys.readouterr()
         assert main(["--agent", "/nope/x.py:graph", "-m", "hi"]) == 1
         capsys.readouterr()
-        assert main(["--agent", "/nope/x.py:graph"]) == 2
+        assert main(["--agent", "/nope/x.py:graph"]) == 1
         capsys.readouterr()
 
 
@@ -281,7 +282,7 @@ def test_missing_agui_extra_exit_code_respects_command(monkeypatch, capsys):
     capsys.readouterr()
     assert main(["--demo", "-m", "hi"]) == 1
     capsys.readouterr()
-    assert main(["--demo"]) == 2  # serve path keeps the usage/can't-start code
+    assert main(["--demo"]) == 1  # can't start is a failure on the serve path too (ADR 0007)
     capsys.readouterr()
 
 
@@ -299,11 +300,12 @@ def test_no_spec_and_usage_errors_exit_code_respects_command(monkeypatch, tmp_pa
     assert "no agent spec" in capsys.readouterr().err
     assert main(["-m", "smoke"]) == 1
     assert "no agent spec" in capsys.readouterr().err
-    assert main([]) == 2  # serve path keeps the usage/can't-start code
+    assert main([]) == 1  # can't start is a failure on the serve path too (ADR 0007)
     capsys.readouterr()
-    assert main(["--demo", "--agent", "x.py:g", "--verify"]) == 1
+    # The --demo/--agent conflict is a usage error on every command (ADR 0007).
+    assert main(["--demo", "--agent", "x.py:g", "--verify"]) == 64
     capsys.readouterr()
-    assert main(["--demo", "--agent", "x.py:g", "-m", "hi"]) == 1
+    assert main(["--demo", "--agent", "x.py:g", "-m", "hi"]) == 64
     capsys.readouterr()
 
 class TestNonRunnableAgentUnderMessage:
@@ -381,7 +383,7 @@ class TestPortInUseFailsBeforeBanner:
         finally:
             holder.close()
         captured = capsys.readouterr()
-        assert rc == 2
+        assert rc == 1  # can't start (ADR 0007)
         assert "Serving" not in captured.out, "no false-green banner"
         assert f"error: cannot serve at http://127.0.0.1:{port}/" in captured.err
         assert "Traceback" not in captured.err

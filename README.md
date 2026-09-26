@@ -272,7 +272,7 @@ langstage-agui --agent my_agent.py:graph -m "hi there"   # run ONE turn with you
 
 `--verify` is the preflight to run right after wiring up an agent: `--show-config` proves the config chain *resolves* a spec, but `--verify` proves it **loads and actually produces a turn** — catching the two most common failures (a typo'd `module:attr`, or a graph that loads but yields an empty/erroring turn) that otherwise only surface at first chat. Keyless, so it fits a CI/deploy gate. `--message`/`-m` is its companion — run one turn with *your* prompt and print the answer (add `--json` for the typed `TurnResult`), exit `0`/`1`/`2` on complete/error/interrupt. The three questions every adopter asks, in order: `--show-config` (resolves?) → `--verify` (runs?) → `--message` (what does it say?).
 
-Every can't-run failure is a clean one-line `error:` on stderr, never a traceback (set `LANGSTAGE_DEBUG=1` for one): an agent that loads but isn't a runnable graph (e.g. a `StateGraph` you forgot to `.compile()`) exits `1` under both `--verify` and `--message` (`--json` still prints a typed `TurnResult` with `outcome: "error"`). When serving, the port is bound **before** the `Serving … at <url>` banner prints, so a port already in use is `error: cannot serve at <url>: …` and exit `2` (the serve path's can't-start code, like an unloadable spec), not a success banner followed by a crash. `serve()` binds first too and raises `OSError` for a busy port.
+Every can't-run failure is a clean one-line `error:` on stderr, never a traceback (set `LANGSTAGE_DEBUG=1` for one): an agent that loads but isn't a runnable graph (e.g. a `StateGraph` you forgot to `.compile()`) exits `1` under both `--verify` and `--message` (`--json` still prints a typed `TurnResult` with `outcome: "error"`). When serving, the port is bound **before** the `Serving … at <url>` banner prints, so a port already in use is `error: cannot serve at <url>: …` and exit `1` (can't start, like an unloadable spec), not a success banner followed by a crash. `serve()` binds first too and raises `OSError` for a busy port.
 
 ```python
 from langstage_core.agui import build_app
@@ -294,6 +294,27 @@ serve(my_compiled_graph, cors_origins="loopback")
 `"*"` is honored only if you pass it explicitly; it is never a default. Credentials (cookies) are not allowed cross-origin.
 
 See [ADR 0001](docs/adr/0001-adopt-ag-ui-for-the-wire.md) for the rationale.
+
+## Exit codes
+
+Every LangStage console script (`langstage-agui`, `python -m langstage_core.host`, and the `langstage`, cli, hermes, jupyter and vscode entry points) uses the same exit codes, so a CI gate reads them the same way on every surface ([ADR 0007](docs/adr/0007-family-exit-codes.md)):
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | failure: no agent spec / not configured, a load or import error, a turn error, a failed `--verify` / selfcheck / doctor, or the server can't start (including a busy port) |
+| `2` | paused on a human-in-the-loop interrupt: the run is fine but needs input |
+| `64` | usage error: bad or conflicting arguments (e.g. an unknown flag, `--demo` with `--agent`) |
+
+argparse's own usage-error code is `2`, which would read as "paused"; the family overrides it to `64`. Surfaces building their own CLI can reuse the constants and parser:
+
+```python
+from langstage_core.cli import EXIT_OK, EXIT_FAIL, EXIT_PAUSED, EXIT_USAGE
+from langstage_core.cli import ArgumentParser, exit_code_for_outcome, usage_error
+
+parser = ArgumentParser(prog="my-surface")   # usage errors exit 64; subparsers inherit it
+exit_code_for_outcome("interrupted")         # 2 ("complete" -> 0, "error"/unknown -> 1)
+```
 
 ## Configuration
 

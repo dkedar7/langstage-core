@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.38] - 2026-09-25
+
+One exit-code scheme for every LangStage command line ([ADR 0007](docs/adr/0007-family-exit-codes.md)):
+`0` success, `1` failure, `2` paused on a human-in-the-loop interrupt, `64` usage error.
+
+### Added
+- **`langstage_core.cli`** (stdlib-only): `EXIT_OK` / `EXIT_FAIL` / `EXIT_PAUSED` / `EXIT_USAGE`,
+  `exit_code_for_outcome()` (complete 0, interrupted 2, error or unknown 1), an `ArgumentParser`
+  subclass whose usage errors exit 64 (sub-parsers inherit it) and `usage_error(parser, msg)` for
+  conflicts found after parsing. Surfaces use these so `2` can only mean "paused".
+- README "Exit codes" section; `langstage-agui --help` lists the codes.
+
+### Changed (breaking for scripts that matched the old codes)
+- `langstage-agui` serve path: no agent spec, an unloadable spec, a missing `[agui]` extra and a
+  busy port exit **`1`** (were `2`). `--verify` / `--message` already used `1` for these.
+- `langstage-agui --demo --agent ...` is a usage error: **`64`** on every command (was `1` under
+  `--verify` / `--message`, `2` when serving).
+- argparse errors (an unknown flag, `--demo=bogus`, `--port abc`) exit **`64`** (were `2`) in
+  `langstage-agui` and `python -m langstage_core.host`. `2` read as "paused", the #174 fail-open.
+
 ## [1.0.37] - 2026-09-25
 
 Wave 4 of the 2026-09 family sweep: two new core bugs, one canonical HITL decision
