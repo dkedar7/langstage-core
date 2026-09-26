@@ -69,6 +69,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from langstage_core.demo._context import user_text
+
 DEFAULT_NAME = "Tool Demo Agent"
 DEFAULT_REPLY_PREFIX = "(demo agent) You said: "
 
@@ -141,11 +143,16 @@ def demo_extractors() -> list[Any]:
 
 
 def _last_human_text(messages: list[Any]) -> str:
-    """The most recent human message's text (''  if none)."""
+    """The most recent human message's typed text ('' if none).
+
+    Surface context (``[Working directory: ...]`` lines, JupyterLab's notebook
+    block) is dropped, so replies, triggers and the tool query see only what the
+    user typed (gh #192).
+    """
     for message in reversed(messages):
         if getattr(message, "type", None) == "human":
             content = message.content
-            return content if isinstance(content, str) else str(content)
+            return user_text(content if isinstance(content, str) else str(content))
     return ""
 
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from langstage_core.demo._context import user_text
+
 DEFAULT_REPLY_PREFIX = "(demo agent) You said: "
 DEFAULT_NAME = "Demo Agent"
 
@@ -50,7 +52,8 @@ def create_stub_agent(
 
     Returns:
         A compiled LangGraph graph that replies to each user message with
-        ``reply_prefix + <last human message>``, streamed token-by-token.
+        ``reply_prefix + <last human message>`` (the typed text only;
+        surface context such as ``[Working directory: ...]`` lines is dropped), streamed token-by-token.
 
     Raises:
         RuntimeError: If ``langgraph`` / ``langchain-core`` are not installed.
@@ -76,7 +79,8 @@ def create_stub_agent(
         for message in reversed(messages):
             if getattr(message, "type", None) == "human":
                 content = message.content
-                return content if isinstance(content, str) else str(content)
+                # Echo only what was typed, not the context surfaces add (gh #192).
+                return user_text(content if isinstance(content, str) else str(content))
         return ""
 
     class EchoChatModel(BaseChatModel):
