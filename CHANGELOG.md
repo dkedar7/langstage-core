@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.40] - 2026-09-28
+
+### Fixed
+- **`TaskRunner.shutdown()` no longer hangs on Python 3.11.** An idle worker waited for its
+  wake signal through `asyncio.wait_for`, and on 3.11 `wait_for` drops a cancel that lands
+  just as the awaited future completes (CPython gh-86296). A cancel racing a wake was lost,
+  the worker kept looping, and `shutdown()` waited on it forever. Any host that started and
+  stopped quickly hit it (the lifespan wakes the workers on start), which is what stalled
+  langstage's Python 3.11 CI. The worker now uses `asyncio.timeout`. The SSE loop in
+  `SessionAdapter.sse` had the same pattern (a client disconnect racing an event was
+  lost) and gets the same fix. A regression test replays the race at eight timings.
+
 ## [1.0.39] - 2026-09-26
 
 ### Fixed
