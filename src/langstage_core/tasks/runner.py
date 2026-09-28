@@ -244,9 +244,13 @@ class TaskRunner:
                 task = None
             if task is None:
                 # Nothing to do: sleep until woken or the poll timeout fires
-                # (the timeout self-heals any missed wake signal).
+                # (the timeout self-heals any missed wake signal). asyncio.timeout, not
+                # wait_for: on Python 3.11 wait_for drops a cancel that lands as the wake
+                # completes, and shutdown() then waits on this worker forever
+                # (CPython gh-86296).
                 try:
-                    await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval)
+                    async with asyncio.timeout(self._poll_interval):
+                        await self._wake.wait()
                 except asyncio.TimeoutError:
                     pass
                 self._wake.clear()

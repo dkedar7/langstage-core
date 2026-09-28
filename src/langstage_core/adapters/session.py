@@ -321,13 +321,16 @@ class SessionAdapter:
             if send_init:
                 yield _sse_frame({"type": "session_init", "session_id": session.id})
             while True:
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for drops a cancel
+                # (client gone) that lands as an event arrives, and the loop runs on
+                # (CPython gh-86296). Yield outside the timeout block.
                 try:
-                    event = await asyncio.wait_for(
-                        session.event_queue.get(), timeout=keepalive
-                    )
-                    yield _sse_frame(event)
+                    async with asyncio.timeout(keepalive):
+                        event = await session.event_queue.get()
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
+                    continue
+                yield _sse_frame(event)
         finally:
             session.sse_connected = False
 
