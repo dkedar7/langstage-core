@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.42] - 2026-10-02
+
+### Fixed
+- **The gh #195 fix holds when the stream is resumed step by step in new tasks.** 1.0.41
+  marked the run core was driving with a context variable set inside the stream. A
+  consumer that resumes each step in a new task (the VS Code sidecar does, for
+  cancellation) doesn't see a variable set in an earlier step. So once a turn had produced
+  output before failing (a partial reply, then a failing tool), the duplicate log printed
+  and the error lost its type again. A run is now matched by its `RunAgentInput`, found in
+  ag-ui-langgraph's `run()` frame when the record is logged, which doesn't depend on the
+  task or context.
+
 ## [1.0.41] - 2026-10-02
 
 ### Fixed

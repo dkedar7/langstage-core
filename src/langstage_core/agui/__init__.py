@@ -27,8 +27,8 @@ Quick start::
 # NB: intentionally NOT `from __future__ import annotations`. The resilient
 # endpoint below needs real (non-string) annotations so FastAPI can resolve
 # RunAgentInput as the request body; PEP 604 unions work natively on >=3.11.
-import contextvars
 import logging
+import sys
 from typing import Any
 
 __all__ = [
@@ -743,22 +743,32 @@ def _as_snapshot_message(m):
 # ``error`` frame: ``Type: message``, plus the traceback under LANGSTAGE_DEBUG (gh #93,
 # #132). So the frames lost the exception type and the debug traceback, and with no logging
 # configured the log record printed a ~50-line traceback to stderr on every surface, debug
-# or not (gh #195). While core drives a run, this filter takes that record's exception for
-# core to re-raise and drops the duplicate log. Records from runs core isn't driving pass
-# through untouched, so the logger behaves as before for anyone else.
-_RUN_FAILURE: contextvars.ContextVar[list | None] = contextvars.ContextVar(
-    "langstage_agui_run_failure", default=None
-)
+# or not (gh #195). For a run core is driving, this filter takes that record's exception for
+# core to re-raise and drops the duplicate log. Records from any other run pass through.
+#
+# A run is matched by its ``RunAgentInput``, found in ``run()``'s frame on the stack, not by
+# a context variable: consumers may resume the stream one step per task (the VS Code
+# sidecar does, for cancellation), and a context variable set in one step isn't seen in the
+# next.
+_ACTIVE_RUNS: dict[int, list] = {}  # id(RunAgentInput) -> that run's captured exception
 _RUN_FAILURE_LOGGER = "ag_ui_langgraph.agent"
 
 
 class _CaptureRunFailure(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        slot = _RUN_FAILURE.get()
-        if slot is None or not record.exc_info or record.exc_info[1] is None:
+        if not _ACTIVE_RUNS or not record.exc_info or record.exc_info[1] is None:
             return True
-        slot.append(record.exc_info[1])
-        return False
+        frame = sys._getframe(1)
+        for _ in range(32):  # logging's own frames, then ag-ui-langgraph's run()
+            if frame is None:
+                break
+            if frame.f_code.co_name == "run":
+                slot = _ACTIVE_RUNS.get(id(frame.f_locals.get("input")))
+                if slot is not None:
+                    slot.append(record.exc_info[1])
+                    return False
+            frame = frame.f_back
+        return True
 
 
 def _install_run_failure_capture() -> None:
@@ -972,7 +982,7 @@ class _TurnStream:
             self._pre_ids = {str(m.id) for m in base if getattr(m, "id", None) is not None}
         _install_run_failure_capture()
         failure: list = []
-        token = _RUN_FAILURE.set(failure)
+        _ACTIVE_RUNS[id(self.run_input)] = failure
         try:
             async for ev in self.agent.run(self.run_input):
                 t = type(ev).__name__
@@ -1012,10 +1022,7 @@ class _TurnStream:
                 yield synth
             raise
         finally:
-            try:
-                _RUN_FAILURE.reset(token)
-            except ValueError:  # finished from another context; nothing of ours is left set
-                pass
+            _ACTIVE_RUNS.pop(id(self.run_input), None)
 
 
 class _ToolTracker:
