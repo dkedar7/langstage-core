@@ -14,8 +14,12 @@ import os
 import subprocess
 import sys
 import textwrap
+from typing import Annotated, TypedDict
 
 import pytest
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
 from langstage_core.agui import _CaptureRunFailure, _install_run_failure_capture
 
@@ -84,3 +88,43 @@ def test_records_outside_a_core_run_pass_through(caplog):
         except RuntimeError:
             logger.exception("LangGraph run failed")
     assert [r.getMessage() for r in caplog.records] == ["LangGraph run failed"]
+
+
+class _S(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+def _partial_then_raise_graph():
+    def answer(state):
+        return {"messages": [AIMessage(content="Here is my partial answer.")]}
+
+    def use_tool(state):
+        raise RuntimeError("tool call failed")
+
+    g = StateGraph(_S)
+    g.add_node("answer", answer)
+    g.add_node("use_tool", use_tool)
+    g.add_edge(START, "answer")
+    g.add_edge("answer", "use_tool")
+    g.add_edge("use_tool", END)
+    return g.compile()
+
+
+async def test_capture_survives_one_task_per_step():
+    """A consumer that resumes the stream in a new task per step (the VS Code sidecar
+    does, for cancellation) still gets the original exception, after the partial reply."""
+    import asyncio
+
+    from langstage_core.agui import iter_event_frames
+
+    agen = iter_event_frames(_partial_then_raise_graph(), "hi", "t-per-task")
+    frames = []
+    while True:
+        try:
+            frames.append(await asyncio.ensure_future(agen.__anext__()))
+        except StopAsyncIteration:
+            break
+    contents = [f["content"] for f in frames if f["type"] == "content"]
+    assert "".join(contents).strip() == "Here is my partial answer."
+    assert frames[-1]["type"] == "error"
+    assert frames[-1]["error"] == "RuntimeError: tool call failed"
