@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.41] - 2026-10-02
+
+### Fixed
+- **A crashing turn is reported once, by core, again** (gh #195). ag-ui-langgraph 0.0.46
+  (released 2026-10-01) catches a graph's exception inside `run()`, logs it with
+  `logger.exception("LangGraph run failed")` and emits a RUN_ERROR that carries only
+  `str(exc)`. That caused two things on every surface:
+  - With no logging configured, a ~50-line traceback printed to stderr ahead of the
+    one-line `error:` (`langstage-agui --verify` / `-m`, the VS Code sidecar's output
+    channel, ...), whether or not `LANGSTAGE_DEBUG` was set.
+  - The terminal `error` frame lost the exception type (`model call failed` instead of
+    `RuntimeError: model call failed`) and, under `LANGSTAGE_DEBUG`, its traceback.
+
+  While core drives a run, it now takes the exception from that log record, drops the
+  duplicate log, and re-raises the exception, so the frames are what they were before
+  0.0.46. Records from runs core isn't driving are untouched. The tests pass on
+  ag-ui-langgraph 0.0.45 and 0.0.46.
+
 ## [1.0.40] - 2026-09-28
 
 ### Fixed
