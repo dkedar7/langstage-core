@@ -27,6 +27,8 @@ Quick start::
 # NB: intentionally NOT `from __future__ import annotations`. The resilient
 # endpoint below needs real (non-string) annotations so FastAPI can resolve
 # RunAgentInput as the request body; PEP 604 unions work natively on >=3.11.
+import contextvars
+import logging
 from typing import Any
 
 __all__ = [
@@ -735,6 +737,36 @@ def _as_snapshot_message(m):
     return out
 
 
+# ag-ui-langgraph >= 0.0.46 catches an exception from the graph inside ``run()``, logs it
+# with ``logger.exception("LangGraph run failed")`` and yields a RUN_ERROR that carries only
+# ``str(exc)``. Before, the exception reached core, which reports it as the terminal
+# ``error`` frame: ``Type: message``, plus the traceback under LANGSTAGE_DEBUG (gh #93,
+# #132). So the frames lost the exception type and the debug traceback, and with no logging
+# configured the log record printed a ~50-line traceback to stderr on every surface, debug
+# or not (gh #195). While core drives a run, this filter takes that record's exception for
+# core to re-raise and drops the duplicate log. Records from runs core isn't driving pass
+# through untouched, so the logger behaves as before for anyone else.
+_RUN_FAILURE: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "langstage_agui_run_failure", default=None
+)
+_RUN_FAILURE_LOGGER = "ag_ui_langgraph.agent"
+
+
+class _CaptureRunFailure(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        slot = _RUN_FAILURE.get()
+        if slot is None or not record.exc_info or record.exc_info[1] is None:
+            return True
+        slot.append(record.exc_info[1])
+        return False
+
+
+def _install_run_failure_capture() -> None:
+    logger = logging.getLogger(_RUN_FAILURE_LOGGER)
+    if not any(isinstance(f, _CaptureRunFailure) for f in logger.filters):
+        logger.addFilter(_CaptureRunFailure())
+
+
 class _TurnStream:
     """Drive ``agent.run(run_input)`` and surface **finished** messages as real AG-UI
     events at the step that produced them: the one place both ``iter_*`` wires and the
@@ -938,6 +970,9 @@ class _TurnStream:
         base = await self._checkpoint_messages()
         if base is not None:
             self._pre_ids = {str(m.id) for m in base if getattr(m, "id", None) is not None}
+        _install_run_failure_capture()
+        failure: list = []
+        token = _RUN_FAILURE.set(failure)
         try:
             async for ev in self.agent.run(self.run_input):
                 t = type(ev).__name__
@@ -946,6 +981,11 @@ class _TurnStream:
                 elif t in ("StepFinishedEvent", "MessagesSnapshotEvent", "RunErrorEvent"):
                     async for synth in self._flush():
                         yield synth
+                    if t == "RunErrorEvent" and failure:
+                        # The graph raised and ag-ui-langgraph turned it into this event:
+                        # raise the original, so every wire reports it as it did before
+                        # 0.0.46 (see _CaptureRunFailure).
+                        raise failure[0]
                 elif t in ("TextMessageStartEvent", "TextMessageContentEvent",
                            "TextMessageEndEvent", "TextMessageChunkEvent"):
                     mid = getattr(ev, "message_id", None)
@@ -971,6 +1011,11 @@ class _TurnStream:
             async for synth in self._flush():
                 yield synth
             raise
+        finally:
+            try:
+                _RUN_FAILURE.reset(token)
+            except ValueError:  # finished from another context; nothing of ours is left set
+                pass
 
 
 class _ToolTracker:
