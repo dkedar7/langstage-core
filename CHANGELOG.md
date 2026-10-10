@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.43] - 2026-10-10
+
+### Fixed
+- **`--verify` shows where the agent crashed under `LANGSTAGE_DEBUG`** (gh #198). It printed
+  only `error: agent did not complete a turn: RuntimeError: ...`, while `--message` printed
+  the crash traceback after that line. `VerifyResult` now carries the error frame's
+  `traceback` (set only under debug, as before), and `--verify` writes it after the error
+  line. Without debug the output is unchanged: one line, exit 1.
+
 ## [1.0.42] - 2026-10-02
 
 ### Fixed

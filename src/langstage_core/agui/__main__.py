@@ -338,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         detail = result.error_message or result.reason
         print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
+        # Under LANGSTAGE_DEBUG, show WHERE it crashed, as --message does (gh #198).
+        tb = result.traceback
+        if tb:
+            sys.stderr.write(tb if tb.endswith("\n") else tb + "\n")
         return 1
 
     # --message: the companion to --verify. --verify proves the agent *runs* with a
