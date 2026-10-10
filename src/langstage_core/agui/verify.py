@@ -45,6 +45,9 @@ class VerifyResult:
     error_message: str | None = None
     content_chars: int = 0
     frames: int = 0
+    #: Where the agent crashed: set only under ``LANGSTAGE_DEBUG`` (the ``error`` frame
+    #: carries it then, gh #132), so ``--verify`` can show it like ``--message`` (gh #198).
+    traceback: str | None = None
 
     def __bool__(self) -> bool:
         return self.ok
@@ -112,6 +115,7 @@ async def averify(
             elif kind == "error":
                 result.saw_error = True
                 result.error_message = frame.get("error")
+                result.traceback = frame.get("traceback")
             elif kind == "complete":
                 result.saw_complete = True
 
@@ -122,6 +126,9 @@ async def averify(
         return result
     except Exception as exc:  # noqa: BLE001 - any failure IS a failed preflight
         result.reason = f"{type(exc).__name__}: {exc}"
+        from . import _debug_traceback_extra
+
+        result.traceback = _debug_traceback_extra().get("traceback")
         return result
 
     # The preflight verdict. The outcome comes from the one shared _terminal_outcome

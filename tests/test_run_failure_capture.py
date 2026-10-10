@@ -128,3 +128,26 @@ async def test_capture_survives_one_task_per_step():
     assert "".join(contents).strip() == "Here is my partial answer."
     assert frames[-1]["type"] == "error"
     assert frames[-1]["error"] == "RuntimeError: tool call failed"
+
+
+def test_verify_shows_the_traceback_under_debug(tmp_path):
+    """gh #198: --verify honors LANGSTAGE_DEBUG like --message: one error line, then
+    the crash traceback; without debug it stays one line (tested above)."""
+    r = _run(tmp_path, "--verify", debug=True)
+    assert r.returncode == 1, r.stderr
+    assert "error: agent did not complete a turn: RuntimeError: deliberate failure" in r.stderr
+    assert "Traceback" in r.stderr and "deliberate failure" in r.stderr.split("Traceback", 1)[1]
+    assert "LangGraph run failed" not in r.stderr
+
+
+def test_verify_result_carries_the_traceback_only_under_debug(monkeypatch):
+    from langstage_core.agui import verify
+
+    monkeypatch.delenv("LANGSTAGE_DEBUG", raising=False)
+    monkeypatch.delenv("DEEPAGENT_DEBUG", raising=False)
+    result = verify(_partial_then_raise_graph())
+    assert not result.ok and result.traceback is None
+    monkeypatch.setenv("LANGSTAGE_DEBUG", "1")
+    result = verify(_partial_then_raise_graph())
+    assert not result.ok
+    assert result.traceback and "RuntimeError: tool call failed" in result.traceback
