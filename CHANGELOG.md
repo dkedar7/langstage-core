@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.46] - 2026-10-11
+
+### Fixed
+- **A resumed turn no longer re-sends what it said before it paused.** When a turn paused
+  on an interrupt and was then resumed, both `iter_*` mappings ended the resumed turn by
+  sending everything from before the pause again: the narration, the tool calls and their
+  results. Their end-of-turn snapshot walk took every message after the last user
+  message, which on a resume is still the original prompt. So after an Approve, the CLI
+  and the chat repeated the earlier text, and the web Board's task detail showed the
+  first half of the transcript twice. The walk now skips messages that were already in
+  the checkpoint before the run, the same rule the per-step synthesis already used.
+
 ## [1.0.45] - 2026-10-11
 
 ### Fixed
