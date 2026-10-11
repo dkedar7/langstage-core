@@ -834,6 +834,20 @@ class _TurnStream:
         self._node_by_message: dict[str, str] = {}
         self._node_by_call: dict[str, str] = {}
 
+    def this_turn(self, messages) -> list:
+        """``messages`` minus those already in the checkpoint before this run.
+
+        The ``iter_*`` end-of-turn snapshot walk takes everything after the last user
+        message, which on a resumed turn is still the original prompt, so it re-sent
+        what the turn said before it paused. Dropping the pre-run ids keeps a resumed
+        turn to its own messages; a new turn's user message isn't in the checkpoint
+        yet, so it and everything after it stay. Without a readable checkpoint
+        (``_pre_ids`` is None) nothing is dropped.
+        """
+        if not self._pre_ids:
+            return list(messages)
+        return [m for m in messages if str(getattr(m, "id", None)) not in self._pre_ids]
+
     def node_of_message(self, message_id, default: str) -> str:
         """The node that produced message ``message_id``, else ``default``."""
         if message_id is None:
@@ -1598,7 +1612,9 @@ async def iter_event_frames(
                 # ag-ui snapshot flattens to its first block (gh langstage-vscode #75).
                 full_text_by_id = await _full_text_by_id(agent, thread_id)
                 for item in _snapshot_items(
-                    ev.messages,
+                    # Only this run's messages: a resumed turn already sent what it
+                    # said before the pause.
+                    stream.this_turn(ev.messages),
                     streamed_ids=streamed_ids,
                     tool_names=tool_names,
                     streamed_result_ids=streamed_result_ids,
@@ -1862,7 +1878,9 @@ async def iter_chunk_frames(
                 # ag-ui snapshot flattens to its first block (gh langstage-vscode #75).
                 full_text_by_id = await _full_text_by_id(agent, thread_id)
                 for item in _snapshot_items(
-                    ev.messages,
+                    # Only this run's messages: a resumed turn already sent what it
+                    # said before the pause.
+                    stream.this_turn(ev.messages),
                     streamed_ids=streamed_ids,
                     tool_names=tool_names,
                     streamed_result_ids=streamed_result_ids,
