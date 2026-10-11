@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.47] - 2026-10-11
+
+### Fixed
+- **An agent's own recursion limit is honored.** `ag-ui-langgraph` builds each run's
+  config with `ensure_config()`, which stamps LangGraph's default `recursion_limit=25`,
+  and that overrides the graph's own default. So a limit set with
+  `graph.with_config(recursion_limit=...)` was ignored, and so was the one deepagents
+  sets: every agent run through LangStage, the default agent included, stopped with
+  `GraphRecursionError` after 25 steps. A real analysis or coding task easily takes
+  more. `build_agent` now carries the graph's limit into the adapter's config; a
+  `recursion_limit` you pass in `config=` still wins.
+
 ## [1.0.46] - 2026-10-11
 
 ### Fixed
