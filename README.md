@@ -70,7 +70,7 @@ Both wires carry the same information; the table is the contract (keys marked *n
 
 | Event wire (`iter_event_frames`) | Chunk wire (`iter_chunk_frames`) | Meaning |
 |---|---|---|
-| `{"type": "content", "content", "role", "node", "message_id"}` | `{"status": "streaming", "chunk", "node", "message_id"}` | Assistant text delta. `message_id` (*new*) is the AIMessage it belongs to: a change of id between two text frames is a **message boundary** (e.g. two nodes' replies) — join with a paragraph break, not inline. |
+| `{"type": "content", "content", "role", "node", "message_id"}` | `{"status": "streaming", "chunk", "node", "message_id"}` | Assistant text delta. `message_id` (*new*) is the AIMessage it belongs to: a change of id between two text frames is a **message boundary** (e.g. two nodes' replies) — join with a paragraph break, not inline. `TurnResult.text` and a task's `result` follow the same rule. |
 | `{"type": "reasoning", "content", "node"}` | `{"status": "streaming", "reasoning", "node"}` | Reasoning-model chain-of-thought, separate from the answer. |
 | `{"type": "tool_start", "id", "name", "args", "node"}` | `{"status": "streaming", "tool_calls": [{"name", "args", "id"}]}` | A tool call (chunk `id` is *new*). |
 | `{"type": "tool_end", "id", "name", "result", "status", "error_message", "duration_ms"}` | `{"status": "streaming", "tool_result", "id", "name", "tool_status", "duration_ms"}` | A tool result (capped at `max_result_len`). `status` / `tool_status` is `"success"` or `"error"`; `duration_ms` is the tool's run time, or `None` when the tool ran outside LangChain's tool runtime (e.g. a hand-written node). Chunk `id` / `name` / `tool_status` / `duration_ms` are *new*; `tool_result` is still the result string. |
