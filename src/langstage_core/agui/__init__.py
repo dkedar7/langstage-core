@@ -225,6 +225,14 @@ def build_agent(
                 graph.checkpointer = saver
         except Exception:  # pragma: no cover - best-effort; LangGraphAgent will surface real issues
             pass
+    # The adapter builds each run's config with ensure_config(), which stamps LangGraph's
+    # default recursion_limit=25, and a passed config overrides the graph's own default.
+    # So a limit set with graph.with_config(recursion_limit=...) was ignored, and so was
+    # deepagents' built-in 1000: every agent stopped after 25 steps. Carry the graph's
+    # limit into the adapter's config unless the caller set one.
+    graph_limit = (getattr(graph, "config", None) or {}).get("recursion_limit")
+    if graph_limit is not None and "recursion_limit" not in (config or {}):
+        config = {**(config or {}), "recursion_limit": graph_limit}
     return _agent_class(LangGraphAgent)(
         name=name, graph=graph, description=description, config=config
     )
