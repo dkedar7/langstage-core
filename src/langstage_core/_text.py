@@ -23,20 +23,24 @@ class TextJoiner:
         self._node: Any = None
         self._message_id: Any = None
 
-    def add(self, text: str, *, node: Any = None, message_id: Any = None) -> None:
+    def add(self, text: str, *, node: Any = None, message_id: Any = None) -> str:
+        """Append one delta; return what was appended (any break, then ``text``),
+        so a caller streaming to a console can write exactly that."""
         if not text:
-            return
+            return ""
         new_message = self._has_text and (
             node != self._node or (message_id is not None and message_id != self._message_id)
         )
+        brk = ""
         if new_message:
             tail = self._parts[-1]
             if not tail.endswith("\n\n"):
-                self._parts.append("\n" if tail.endswith("\n") else "\n\n")
-        self._parts.append(text)
+                brk = "\n" if tail.endswith("\n") else "\n\n"
+        self._parts.append(brk + text)
         self._node = node
         self._message_id = message_id
         self._has_text = self._has_text or bool(text.strip())
+        return brk + text
 
     def text(self) -> str:
         return "".join(self._parts)

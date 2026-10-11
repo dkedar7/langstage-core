@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.45] - 2026-10-11
+
+### Fixed
+- **`langstage-agui -m` keeps the paragraph break between messages too** (gh #200). 1.0.44 fixed
+  `TurnResult.text`, `--json` and a task's `result`, but plain `-m` streams each text chunk to the
+  console as it arrives and never builds a `TurnResult`, so it still printed the turn's messages
+  as one run-on line. It now writes the break at each message boundary, the same rule.
+
 ## [1.0.44] - 2026-10-11
 
 ### Fixed

@@ -44,6 +44,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
     """
     import asyncio
 
+    from .._text import TextJoiner
     from ..console import safe_print, safe_write
     from . import _debug_traceback_extra, build_agent, iter_chunk_frames
     from .collect import collect_chunk_frames
@@ -100,12 +101,14 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
     async def _stream() -> None:
         nonlocal outcome
         wrote_text = False
+        text = TextJoiner()  # paragraph break at each message boundary (gh #200)
         async for chunk in iter_chunk_frames(agent, message, "oneshot"):
             status = chunk.get("status")
             if status == "streaming" and "chunk" in chunk:
                 # Model text is arbitrary Unicode: escape what the console can't
                 # encode instead of crashing mid-reply on cp1252 (gh #153).
-                safe_write(chunk["chunk"], flush=True)
+                safe_write(text.add(chunk["chunk"] or "", node=chunk.get("node"),
+                                    message_id=chunk.get("message_id")), flush=True)
                 wrote_text = True
             elif status == "interrupt":
                 outcome = "interrupted"
