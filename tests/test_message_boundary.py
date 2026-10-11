@@ -83,6 +83,15 @@ def test_missing_message_ids_in_one_node_join_unbroken():
     assert _join(("a", "agent", None), ("b", "agent", None)) == "ab"
 
 
+def test_add_returns_what_it_appended():
+    j = TextJoiner()
+    assert j.add("a", node="x", message_id="m1") == "a"
+    assert j.add("b", node="x", message_id="m1") == "b"
+    assert j.add("c", node="x", message_id="m2") == "\n\nc"
+    assert j.add("", node="x", message_id="m3") == ""
+    assert j.text() == "ab\n\nc"
+
+
 def test_existing_trailing_newlines_are_topped_up_not_doubled():
     assert _join(("a\n", "x", "m1"), ("b", "x", "m2")) == "a\n\nb"
     assert _join(("a\n\n", "x", "m1"), ("b", "x", "m2")) == "a\n\nb"
@@ -119,6 +128,17 @@ async def test_chunk_collector_breaks_between_messages(agui):
 
 def test_run_turn_breaks_between_messages(agui):
     assert agui.run_turn(_fin_graph(), "hi").text == ROUTER_THEN_ANSWER
+
+
+def test_message_streamed_reply_breaks_between_messages(agui, tmp_path, capsys):
+    # Plain -m streams each chunk to stdout as it arrives (no TurnResult), so the
+    # break has to be written at the boundary, not joined at the end.
+    from langstage_core.agui.__main__ import main
+
+    (tmp_path / "fin_agent.py").write_text(FIN_AGENT, encoding="utf-8")
+    rc = main(["--agent", f"{tmp_path / 'fin_agent.py'}:graph", "-m", "hi"])
+    assert rc == 0
+    assert capsys.readouterr().out == ROUTER_THEN_ANSWER + "\n"
 
 
 def test_message_json_breaks_between_messages(agui, tmp_path, capsys):
