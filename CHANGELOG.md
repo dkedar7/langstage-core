@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.44] - 2026-10-11
+
+### Fixed
+- **One-shot results keep the paragraph break between a turn's messages** (gh #200). The
+  frame contract says a change of `message_id` between two text frames is a message
+  boundary, joined with a paragraph break. `TurnResult.text` (from `run_turn` and both
+  collectors, so also `langstage-agui -m` and `--json`) and the task engine's `result`
+  joined every text frame inline, so a tool-calling turn that said "Let me add those."
+  before the call and "The sum is 42." after it came back as one run-on line. Both now
+  insert a paragraph break at each boundary, the rule the CLI and the VS Code panel
+  already apply. Text within one message is unchanged.
+
 ## [1.0.43] - 2026-10-10
 
 ### Fixed

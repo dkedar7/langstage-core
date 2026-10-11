@@ -43,6 +43,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .._text import TextJoiner
 from . import (
     _is_langgraph_agent,
     _terminal_outcome,
@@ -121,7 +122,7 @@ async def collect_event_frames(
     """
     agent = agent if _is_langgraph_agent(agent) else build_agent(agent)
 
-    text_parts: list[str] = []
+    text = TextJoiner()  # paragraph break at each message boundary (gh #200)
     reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     extractions: list[dict] = []
@@ -142,7 +143,8 @@ async def collect_event_frames(
         frames += 1
         kind = frame.get("type")
         if kind == "content":
-            text_parts.append(frame.get("content") or "")
+            text.add(frame.get("content") or "", node=frame.get("node"),
+                     message_id=frame.get("message_id"))
         elif kind == "reasoning":
             reasoning_parts.append(frame.get("content") or "")
         elif kind == "tool_start":
@@ -170,7 +172,7 @@ async def collect_event_frames(
 
     outcome = _terminal_outcome(saw_interrupt=interrupt is not None, saw_error=error is not None)
     return TurnResult(
-        text="".join(text_parts),
+        text=text.text(),
         outcome=outcome,
         tool_calls=tool_calls,
         extractions=extractions,
@@ -206,7 +208,7 @@ async def collect_chunk_frames(
     """
     agent = agent if _is_langgraph_agent(agent) else build_agent(agent)
 
-    text_parts: list[str] = []
+    text = TextJoiner()  # paragraph break at each message boundary (gh #200)
     reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
     extractions: list[dict] = []
@@ -228,7 +230,8 @@ async def collect_chunk_frames(
         status = chunk.get("status")
         if status == "streaming":
             if "chunk" in chunk:
-                text_parts.append(chunk.get("chunk") or "")
+                text.add(chunk.get("chunk") or "", node=chunk.get("node"),
+                         message_id=chunk.get("message_id"))
             if "reasoning" in chunk:
                 reasoning_parts.append(chunk.get("reasoning") or "")
             for tc in chunk.get("tool_calls") or []:
@@ -252,7 +255,7 @@ async def collect_chunk_frames(
 
     outcome = _terminal_outcome(saw_interrupt=interrupt is not None, saw_error=error is not None)
     return TurnResult(
-        text="".join(text_parts),
+        text=text.text(),
         outcome=outcome,
         tool_calls=tool_calls,
         extractions=extractions,

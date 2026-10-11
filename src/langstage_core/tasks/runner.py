@@ -26,6 +26,7 @@ import logging
 import uuid
 from typing import Any, Optional
 
+from .._text import TextJoiner
 from .state import (
     CANCELLED,
     DONE,
@@ -286,7 +287,7 @@ class TaskRunner:
         """Stream the run's events to the store as they arrive, then record the
         terminal outcome. Streaming (vs draining at the end) is what makes the
         per-task detail/replay view possible — including live-tailing."""
-        content_parts: list[str] = []
+        text = TextJoiner()  # paragraph break at each message boundary (gh #200)
         q = getattr(session, "event_queue", None)
         run_task = getattr(session, "current_task", None)
         try:
@@ -295,7 +296,8 @@ class TaskRunner:
                     event = await q.get()
                     await self._store.append_events(task_id, [event])
                     if event.get("type") == "content" and event.get("role", "assistant") == "assistant":
-                        content_parts.append(event.get("content", ""))
+                        text.add(event.get("content", ""), node=event.get("node"),
+                                 message_id=event.get("message_id"))
                     if event.get("type") in _TERMINAL_EVENT_TYPES:
                         break
             if run_task is not None and not run_task.done():
@@ -313,7 +315,7 @@ class TaskRunner:
         except Exception:  # pragma: no cover - _produce captures its own errors
             logger.exception("task %s run raised", task_id)
 
-        result_text = "".join(content_parts).strip() or None
+        result_text = text.text().strip() or None
         await self._record_outcome(task_id, session, result_text)
 
     async def _flush_remaining(self, task_id: str, q: Any) -> None:
