@@ -445,3 +445,37 @@ class TestShowConfigNamesOmittedKeys:
         described = HostConfig.resolve(env={}, use_toml=False).describe()
         assert "not used by this surface" not in described
         assert "omitted" not in HostConfig.resolve(env={}, use_toml=False).config_dict()
+
+
+@pytest.mark.parametrize(
+    "argv, clash",
+    [
+        (["--demo=tools", "--verify", "-m", "ask me"], "--verify and --message"),
+        (["--demo", "--show-config", "-m", "hi"], "--show-config and --message"),
+        (["--demo", "--show-config", "--verify"], "--show-config and --verify"),
+    ],
+)
+def test_conflicting_modes_are_a_usage_error(argv, clash, capsys):
+    # gh #205: the losing mode was dropped with exit 0. `--verify -m` passed the
+    # keyless check without running the prompt (which here would pause, exit 2).
+    assert main(argv) == 64
+    err = capsys.readouterr().err
+    assert clash in err and "mutually exclusive" in err
+
+
+@pytest.mark.parametrize("argv", [["--demo", "--verify", "--json"], ["--demo", "--json"]])
+def test_json_without_message_or_show_config_is_a_usage_error(argv, capsys, monkeypatch):
+    # --verify --json printed human text; plain --json started a blocking server.
+    monkeypatch.setattr(agui_pkg, "serve", lambda *a, **k: pytest.fail("must not serve"))
+    assert main(argv) == 64
+    assert "--json only applies to --message or --show-config" in capsys.readouterr().err
+
+
+def test_json_still_works_with_message_and_show_config(capsys):
+    pytest.importorskip("ag_ui_langgraph")
+    import json
+
+    assert main(["--demo", "--show-config", "--json"]) == 0
+    json.loads(capsys.readouterr().out)
+    assert main(["--demo", "-m", "hi", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "complete"

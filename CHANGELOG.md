@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.48] - 2026-10-12
+
+### Fixed
+- **`langstage-agui` no longer drops a conflicting flag** (gh #205). `--show-config`,
+  `--verify` and `--message` ran in a fixed order and the losers were ignored with exit
+  `0`. So `--verify -m "<prompt>"` passed the keyless check without ever running the
+  prompt, a false green in a CI gate, and `--json` without `--message` printed human
+  text or started a blocking server. Two of those modes together, or `--json` without
+  `--message` or `--show-config`, are now a one-line usage error with exit `64`, as
+  ADR 0007 says and as `--demo --agent` already was.
+
 ## [1.0.47] - 2026-10-11
 
 ### Fixed

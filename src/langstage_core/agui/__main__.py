@@ -225,6 +225,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo and args.agent:
         # A usage error on every command (ADR 0007): 64, never 2 (== paused).
         return usage_error(parser, "--demo and --agent are mutually exclusive")
+    # The modes ran in a fixed order and the losers were dropped with exit 0, so
+    # `--verify -m "<prompt>"` passed the keyless check without ever running the
+    # prompt: a false green. Post-parse conflicts are usage errors too (ADR 0007).
+    # (gh #205)
+    modes = [flag for flag, on in (("--show-config", args.show_config), ("--verify", args.verify),
+                                   ("--message", args.message is not None)) if on]
+    if len(modes) > 1:
+        return usage_error(parser, f"{' and '.join(modes)} are mutually exclusive; pick one")
+    if args.as_json and modes not in (["--message"], ["--show-config"]):
+        # Without one of these, --json printed human text (--verify) or started a
+        # blocking server, so a script waiting for JSON got neither.
+        return usage_error(parser, "--json only applies to --message or --show-config")
 
     # CLI flags are overrides on the resolved config so --show-config and the actual
     # bind always agree (and env / langstage.toml host/port/agent work). --agent must
