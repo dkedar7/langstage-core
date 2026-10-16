@@ -961,7 +961,7 @@ wheels = [
 
 [[package]]
 name = "langstage-core"
-version = "1.0.48"
+version = "1.0.49"
 source = { editable = "." }
 dependencies = [
     { name = "langchain-core" },
