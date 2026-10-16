@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.49] - 2026-10-15
+
+### Fixed
+- **A bad project `langstage.toml` value falls back to the global config, not the
+  default** (gh #207). Both TOML files were merged before any value was checked, so an
+  out-of-range or malformed value in the project file (`port = 70000`,
+  `port = "80 50"`) threw away a valid value in `~/.langstage/config.toml` and served
+  on the built-in default. Each file is now converted and checked on its own, global
+  then project, so the rejected value falls back one layer, as the README says and as
+  env over TOML already did (#189). The note names the value kept and the file it came
+  from. Table-valued keys still merge across both files.
+
 ## [1.0.48] - 2026-10-12
 
 ### Fixed

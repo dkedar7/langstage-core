@@ -1,5 +1,5 @@
 """Tests for the layered HostConfig resolver (defaults < TOML < env < overrides)."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
@@ -788,3 +788,77 @@ class TestValidatorFallsBackToTheLayerBeneath:
         cfg = HostConfig.resolve(env={}, toml_start=tmp_path)
         assert cfg.port == 8050 and cfg.sources["port"] == "default"
         assert "using default 8050 instead." in capsys.readouterr().err
+
+
+class TestBadProjectTomlFallsBackToGlobal:
+    """gh #207: a rejected project langstage.toml value falls back to the valid global
+    config.toml value one layer down, not to the built-in default -- the TOML-file
+    sibling of #189."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_note_dedupe(self):
+        import langstage_core.host.config as config_mod
+
+        for seen in (config_mod._warned_invalid_value, config_mod._warned_malformed_toml_value):
+            seen.clear()
+        yield
+        for seen in (config_mod._warned_invalid_value, config_mod._warned_malformed_toml_value):
+            seen.clear()
+
+    @staticmethod
+    def _layers(gdir: Path, tmp_path: Path, global_body: str, project_body: str) -> Path:
+        (gdir / "config.toml").write_text(global_body)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "langstage.toml").write_text(project_body)
+        return proj
+
+    def test_out_of_range_project_value_keeps_the_global_value(
+        self, isolated_global, tmp_path, capsys
+    ):
+        proj = self._layers(isolated_global, tmp_path, "[server]\nport = 7001\n", "[server]\nport = 70000\n")
+        cfg = HostConfig.resolve(env={}, toml_start=proj)
+        assert cfg.port == 7001
+        assert cfg.sources["port"] == "toml (config.toml)"
+        assert "using 7001 (toml (config.toml)) instead." in capsys.readouterr().err
+
+    def test_malformed_project_value_keeps_the_global_value(
+        self, isolated_global, tmp_path, capsys
+    ):
+        proj = self._layers(isolated_global, tmp_path, "[server]\nport = 7001\n", '[server]\nport = "80 50"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=proj)
+        assert cfg.port == 7001
+        assert cfg.sources["port"] == "toml (config.toml)"
+        err = capsys.readouterr().err
+        assert "langstage.toml" in err and "using 7001 (toml (config.toml)) instead." in err
+        assert [i["source"] for i in cfg.config_issues()] == ["toml:server.port"]
+
+    def test_valid_project_value_still_wins(self, isolated_global, tmp_path):
+        proj = self._layers(isolated_global, tmp_path, "[server]\nport = 7001\n", "[server]\nport = 7002\n")
+        cfg = HostConfig.resolve(env={}, toml_start=proj)
+        assert cfg.port == 7002 and cfg.sources["port"] == "toml (langstage.toml)"
+
+    def test_both_bad_falls_back_to_the_default(self, isolated_global, tmp_path, capsys):
+        proj = self._layers(isolated_global, tmp_path, "[server]\nport = 0\n", '[server]\nport = "x"\n')
+        cfg = HostConfig.resolve(env={}, toml_start=proj)
+        assert cfg.port == 8050 and cfg.sources["port"] == "default"
+        assert "using default 8050 instead." in capsys.readouterr().err
+
+    def test_relative_path_is_rebased_on_the_file_that_supplied_it(
+        self, isolated_global, tmp_path
+    ):
+        proj = self._layers(isolated_global, tmp_path, '[workspace]\nroot = "gws"\n', "[server]\nport = 7002\n")
+        cfg = HostConfig.resolve(env={}, toml_start=proj)
+        assert Path(cfg.workspace_root) == (isolated_global / "gws").resolve()
+        assert cfg.sources["workspace_root"] == "toml (config.toml)"
+
+    def test_table_valued_key_still_deep_merges_across_files(self, isolated_global, tmp_path):
+        @dataclass
+        class T(HostConfig):
+            extra: dict = field(default_factory=dict)
+            _TOML: ClassVar[dict] = {"extra": "x.extra"}
+
+        proj = self._layers(isolated_global, tmp_path, "[x.extra]\na = 1\n", "[x.extra]\nb = 2\n")
+        cfg = T.resolve(env={}, toml_start=proj)
+        assert cfg.extra == {"a": 1, "b": 2}
+        assert cfg.sources["extra"] == "toml (langstage.toml)"

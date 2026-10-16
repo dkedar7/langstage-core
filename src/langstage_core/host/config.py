@@ -600,33 +600,36 @@ class HostConfig:
 
             tkey = toml_map.get(name)
             if tkey is not None:
-                tv = _get_dotted(toml_data, tkey)
-                if tv is not None:
+                # Coerce + validate each file on its own, global then project, so a
+                # rejected project value falls back to the valid global value one layer
+                # down, not to the built-in default (gh #207, the TOML-file sibling of
+                # #189). Each accepted value is attributed to the file that supplied it,
+                # and a relative path is rebased onto THAT file's directory (gh langstage
+                # #119). A table-valued key (a free-form dict field) keeps the deep-merged
+                # view, so global and project entries still combine.
+                layers = toml_files
+                if isinstance(_get_dotted(toml_data, tkey), dict):
+                    winner = next(
+                        (p for p, d in reversed(toml_files) if _get_dotted(d, tkey) is not None),
+                        None,
+                    )
+                    layers = [(winner, toml_data)] if winner is not None else []
+                for tpath, tdata in layers:
+                    tv = _get_dotted(tdata, tkey)
+                    if tv is None:
+                        continue
                     try:
                         coerced = _coerce(f, tv)
                     except (ValueError, TypeError) as exc:
-                        # An uncoercible value keeps the default AND the "default"
-                        # source, so --show-config can never present an unusable
-                        # value as a live TOML setting. (gh langstage-jupyter #78)
-                        _warn_malformed_toml_value(tkey, tv, exc, val, toml_paths)
+                        # An uncoercible value keeps whatever the layer beneath resolved
+                        # (and its source), so --show-config can never present an
+                        # unusable value as a live TOML setting. (gh langstage-jupyter #78)
+                        _warn_malformed_toml_value(tkey, tv, exc, val, [tpath], kept_src=src)
                         value_issues.append(_value_issue(
                             "malformed_value", name, f"toml:{tkey}", tv, exc, val
                         ))
-                    else:
-                        # Attribute the value to the highest-precedence file that actually
-                        # defines this key, not blindly to the last file read — a global
-                        # (~/.langstage/config.toml) value must not be mislabeled as coming
-                        # from the project langstage.toml (gh langstage #119).
-                        winner = next(
-                            (p for p, d in reversed(toml_files) if _get_dotted(d, tkey) is not None),
-                            None,
-                        )
-                        if winner is not None:
-                            _accept(coerced, f"toml ({winner.name})", winner.parent)
-                        elif toml_paths:
-                            _accept(coerced, f"toml ({toml_paths[-1].name})", toml_paths[-1].parent)
-                        else:
-                            _accept(coerced, "toml")
+                        continue
+                    _accept(coerced, f"toml ({tpath.name})", tpath.parent)
 
             if name in env_map:
                 var, caster = env_map[name]
@@ -1209,22 +1212,27 @@ def _warn_invalid_value(
 
 
 def _warn_malformed_toml_value(
-    key: str, value: Any, exc: Exception, default: Any, paths: list[Path]
+    key: str, value: Any, exc: Exception, kept: Any, paths: list[Path],
+    kept_src: str = "default",
 ) -> None:
     """One-line stderr note when a TOML value can't be coerced to its field's type.
 
     Mirrors the numeric env casters' note and #42's malformed-syntax note: name what
     was ignored, why, and what is used instead. It also names the file, because the
     whole point of gh langstage-jupyter #78 is that the user was never pointed back
-    at ``langstage.toml``. ASCII-only so it can't crash a cp1252 Windows console.
+    at ``langstage.toml``. A bad project value falls back to the global config value
+    when one is set (gh #207), so the note names the kept value and its source, like
+    the env note. ``paths`` ends with the offending file (langstage-hermes calls this
+    too, with the old positional signature). ASCII-only so it can't crash a cp1252 Windows console.
     """
     dedupe = (key, repr(value))
     if dedupe in _warned_malformed_toml_value:
         return
     _warned_malformed_toml_value.add(dedupe)
     where = f" in {paths[-1]}" if paths else ""
+    kept_desc = f"default {kept!r}" if kept_src == "default" else f"{kept!r} ({kept_src})"
     print(
         f"note: ignoring malformed {key}={value!r}{where} "
-        f"({type(exc).__name__}: {exc}); using default {default!r} instead.",
+        f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
         file=sys.stderr,
     )
