@@ -1,6 +1,6 @@
 [project]
 name = "langstage-core"
-version = "1.0.49"
+version = "1.0.50"
 description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
 readme = "README.md"
 license = {text = "MIT"}
@@ -98,6 +98,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/langstage_core"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".venv*", "dist", ".pytest_cache", ".ruff_cache"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
