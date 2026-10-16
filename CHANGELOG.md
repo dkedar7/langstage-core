@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.50] - 2026-10-15
+
+### Fixed
+- **The source distribution no longer bundles a local virtualenv.** Since at least
+  1.0.47 the sdist on PyPI carried a stray `.venv311/` directory from the release
+  machine (about 11 MB, 8,000 files). Only `.venv` was ignored, so hatchling picked it
+  up. `.venv*/` is now ignored and the sdist excludes it explicitly. The wheel was never
+  affected.
+
 ## [1.0.49] - 2026-10-15
 
 ### Fixed
