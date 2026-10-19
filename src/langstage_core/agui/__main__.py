@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from ..cli import EXIT_FAIL, EXIT_OK, ArgumentParser, exit_code_for_outcome, usage_error
+from ..cli import EXIT_FAIL, EXIT_OK, ArgumentParser, exit_code_for_outcome, port_arg, usage_error
 
 # The keyless built-in demos, keyed by the value of --demo. Bare `--demo` selects
 # "echo" (the plain token echo stub, unchanged); `--demo=tools` selects the rich
@@ -163,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     # while --show-config printed HostConfig's localhost:8050 — advertised values
     # disagreed with what the server actually bound (gh #-dogfood).
     parser.add_argument("--host", default=None, help="Bind host (default from host config).")
-    parser.add_argument("--port", type=int, default=None, help="Bind port (default from host config).")
+    # An out-of-range --port is a usage error, not a silent fallback (gh #210).
+    parser.add_argument("--port", type=port_arg, default=None, help="Bind port (default from host config).")
     parser.add_argument("--path", default="/", help="Endpoint path (default '/').")
     parser.add_argument("--name", default=None, help="Agent display name for AG-UI clients.")
     parser.add_argument(

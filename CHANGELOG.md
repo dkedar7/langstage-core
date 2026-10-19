@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.51] - 2026-10-19
+
+### Fixed
+- **Config diagnostics no longer print secrets (gh #211).** `describe()` (`--show-config`,
+  `langstage config`) printed a Basic-Auth password in plaintext, and so did
+  `config_dict()` (`--json`). The README sends users to these commands for CI and deploy
+  logs. Both now print `********` for a credential field, while keeping its source and env
+  and TOML keys. `config_dict()` adds `"secret": true` and `"set": <bool>`. A field is a
+  credential when it is named `password`, `*_password`, `*_secret`, `*_token` or
+  `*_api_key`, or when a subclass lists it in the new `_SECRETS` class attribute (merged
+  across the MRO). The resolved value itself is unchanged.
+- **`langstage-agui --port 70000` (or `0`) is a usage error (gh #210).** An out-of-range
+  port typed on the command line used to fall back silently to the `langstage.toml` port
+  or 8050, so the server ran on a port nobody asked for. It now exits 64 with
+  `argument --port: 70000 out of range (must be 1-65535)`, the same as `--port abc`. The
+  new `langstage_core.cli.port_arg` is the `type=` for any surface's `--port` flag. A bad
+  port in `LANGSTAGE_PORT` or `langstage.toml` still falls back one layer with a note.
+
 ## [1.0.50] - 2026-10-15
 
 ### Fixed

@@ -36,6 +36,7 @@ __all__ = [
     "EXIT_USAGE",
     "ArgumentParser",
     "exit_code_for_outcome",
+    "port_arg",
     "usage_error",
 ]
 
@@ -63,6 +64,23 @@ class ArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
+def port_arg(value: str) -> int:
+    """``argparse`` ``type=`` for a ``--port`` flag: an integer in 1-65535, else a usage
+    error (exit 64 with :class:`ArgumentParser`).
+
+    A bad port in ``LANGSTAGE_PORT`` or ``langstage.toml`` falls back one layer with a
+    note, but a port typed on this command line is an explicit request: serving on a
+    different port than the one asked for is worse than refusing (gh #210).
+    """
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if not 1 <= n <= 65535:
+        raise argparse.ArgumentTypeError(f"{n} out of range (must be 1-65535)")
+    return n
 
 
 def usage_error(parser: argparse.ArgumentParser, message: str) -> int:

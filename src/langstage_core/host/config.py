@@ -28,6 +28,7 @@ from, and the env var / TOML key that sets it — so you never have to remember
 the variable names.
 """
 import os
+import re
 import sys
 import warnings
 from dataclasses import MISSING, dataclass, fields, replace
@@ -213,6 +214,10 @@ def _env_bool_strict(value: str) -> bool:
     raise ValueError(
         f"unrecognized boolean {value!r}; expected one of {', '.join(_TRUTHY + _FALSY)}"
     )
+
+
+_SECRET_NAME = re.compile(r"(^|_)(password|secret|token|api_key)$")
+SECRET_MASK = "********"
 
 
 def _port_in_range(value: Any) -> int:
@@ -492,6 +497,21 @@ class HostConfig:
         for klass in reversed(cls.__mro__):
             merged.update(getattr(klass, "_VALIDATORS", {}))
         return merged
+
+    # Fields whose VALUE the config diagnostics (describe / config_dict) never print:
+    # they show that the value is set and where it came from, not what it is (gh #211).
+    # Any field named like a credential (``password``, ``*_password``, ``*_secret``,
+    # ``*_token``, ``*_api_key``) is masked without being listed, so a surface that adds
+    # one later is covered; list others here. Merged across the MRO.
+    _SECRETS: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def _secret_keys(cls) -> set[str]:
+        keys: set[str] = set()
+        for klass in cls.__mro__:
+            keys.update(getattr(klass, "_SECRETS", ()) or ())
+        keys.update(f.name for f in fields(cls) if _SECRET_NAME.search(f.name))
+        return keys
 
     @classmethod
     def _toml_paths_map(cls) -> dict[str, str]:
@@ -878,18 +898,25 @@ class HostConfig:
         omit = set(omit_keys or ())
         env_map = type(self)._env_map()
         toml_map = type(self)._toml_map()
+        secrets = type(self)._secret_keys()
         src = self.sources
         config: dict[str, dict] = {}
         for f in fields(self):
             if f.name in omit:
                 continue
+            value = getattr(self, f.name)
             entry: dict = {
-                "value": getattr(self, f.name),
+                "value": value,
                 "source": src.get(f.name, "default"),
                 "env": None,
                 "legacy_env": None,
                 "toml": toml_map.get(f.name),
             }
+            if f.name in secrets:
+                # Whether it's set and from where, never the value (gh #211).
+                entry["value"] = SECRET_MASK if value else value
+                entry["secret"] = True
+                entry["set"] = bool(value)
             if f.name in env_map:
                 canonical, legacy = _env_pair(env_map[f.name][0])
                 entry["env"] = canonical
@@ -946,12 +973,15 @@ class HostConfig:
         omit = set(omit_keys or ())
         env_map = type(self)._env_map()
         toml_map = type(self)._toml_map()
+        secrets = type(self)._secret_keys()
         src = self.sources
         lines = ["Resolved config  (value  [source]):", ""]
         for f in fields(self):
             if f.name in omit:
                 continue
             value = getattr(self, f.name)
+            if f.name in secrets and value:
+                value = f"{SECRET_MASK} (set)"  # never the secret itself (gh #211)
             origin = src.get(f.name, "default")
             hints = []
             if f.name in env_map:
