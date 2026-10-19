@@ -395,11 +395,17 @@ class TestPortInUseFailsBeforeBanner:
         monkeypatch.setattr(
             agui_pkg, "serve", lambda graph, **kw: seen.append((kw["sock"], kw["sock"].getsockname()))
         )
-        rc = main(["--demo", "--host", "127.0.0.1", "--port", "0"])
+        import socket
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # a free port (--port 0 is a usage error, gh #210)
+        probe.close()
+        rc = main(["--demo", "--host", "127.0.0.1", "--port", str(port)])
         assert rc == 0
         assert "Serving" in capsys.readouterr().out
         sock, name = seen[0]
-        assert name[0] == "127.0.0.1"  # serve() got the socket main() already bound
+        assert name == ("127.0.0.1", port)  # serve() got the socket main() already bound
         assert sock.fileno() == -1  # ...and main() closed it once serve() returned
 
     def test_serve_raises_oserror_on_a_busy_port(self):
