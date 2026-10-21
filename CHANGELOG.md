@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.52] - 2026-10-21
+
+### Fixed
+- **Config diagnostics no longer print `[configurable]` credentials (gh #213).** The #211
+  masking covered config fields but not the `[configurable]` table, so a key like
+  `api_key`, `openai_api_key` or `db_password` printed in plaintext in `--show-config`,
+  `--show-config --json`, `python -m langstage_core.host` and `config_dict(configurable=...)`.
+  Credential-named keys (the same rule: `password`, `*_password`, `*_secret`, `*_token`,
+  `*_api_key`, any case) now show as `******** (set)` in text and `"********"` in JSON, at
+  any depth, including tables in lists. An empty value still shows as empty. This is
+  display only: the graph still receives the real values. New helpers:
+  `langstage_core.host.config.mask_secrets` and `is_secret_name`.
+
 ## [1.0.51] - 2026-10-19
 
 ### Fixed
