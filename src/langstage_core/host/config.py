@@ -220,6 +220,31 @@ _SECRET_NAME = re.compile(r"(^|_)(password|secret|token|api_key)$")
 SECRET_MASK = "********"
 
 
+def is_secret_name(name: Any) -> bool:
+    """Whether a key looks like a credential (``password``, ``*_secret``, ``*_token``,
+    ``*_api_key``, ...), ignoring case: the rule config fields are masked by (gh #211)."""
+    return isinstance(name, str) and bool(_SECRET_NAME.search(name.strip().lower()))
+
+
+def mask_secrets(value: Any) -> Any:
+    """A display copy of ``value`` with each credential-named key's value replaced by
+    :data:`SECRET_MASK`, recursing into nested tables and lists. An empty value stays
+    empty, so a report still shows it's unset. ``value`` itself is never changed: the
+    graph keeps receiving the real one. (gh #213, the ``[configurable]`` sibling of #211)
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if is_secret_name(k) and not isinstance(v, (dict, list)):
+                out[k] = SECRET_MASK if v not in (None, "") else v
+            else:
+                out[k] = mask_secrets(v)
+        return out
+    if isinstance(value, list):
+        return [mask_secrets(v) for v in value]
+    return value
+
+
 def _port_in_range(value: Any) -> int:
     """Validate a resolved port is in the bindable range 1-65535, else raise ``ValueError``.
 
@@ -943,7 +968,8 @@ class HostConfig:
         if omitted:
             out["omitted"] = omitted  # keys this surface doesn't use (gh #145)
         if configurable is not None:
-            out["configurable"] = dict(configurable)
+            # Display only: credential-named keys are masked (gh #213).
+            out["configurable"] = mask_secrets(dict(configurable))
         return out
 
     def describe(
@@ -1029,10 +1055,13 @@ class HostConfig:
         if configurable:
             lines.append("")
             lines.append("  LangGraph configurable:")
-            for k, v in configurable.items():
-                v_str = str(v)
-                if len(v_str) > 50:
-                    v_str = v_str[:50] + "..."
+            for k, v in mask_secrets(dict(configurable)).items():
+                if is_secret_name(k) and v == SECRET_MASK:
+                    v_str = f"{SECRET_MASK} (set)"  # never the credential itself (gh #213)
+                else:
+                    v_str = str(v)
+                    if len(v_str) > 50:
+                        v_str = v_str[:50] + "..."
                 lines.append(f"    {k}: {v_str}")
         return "\n".join(lines)
 
