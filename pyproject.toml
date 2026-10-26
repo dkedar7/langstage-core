@@ -1,7 +1,7 @@
 [project]
 name = "langstage-core"
-version = "1.0.52"
-description = "Universal parser + host layer for LangGraph agents — typed stream events, agent-spec loading, layered config, an AG-UI bridge, and an async task-delegation engine"
+version = "1.0.53"
+description = "Shared core for LangStage: a host layer for LangGraph agents (spec loading + layered config), an in-process AG-UI bridge for any CompiledGraph, an async task-delegation engine, and interrupt-aware input helpers"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"

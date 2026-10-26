@@ -114,6 +114,40 @@ def _schema_keys_without_pydantic(graph: Any, constant_keys: list) -> dict:
 
 _AGENT_CLASSES: dict = {}
 
+# LangGraph's own `configurable` keys. ag-ui-langgraph copies all of `configurable` into
+# the run `context`; these belong to the checkpointer (they still reach it via `config`).
+_CONFIGURABLE_INTERNAL = frozenset({"thread_id", "checkpoint_ns", "checkpoint_id", "checkpoint_map", "run_id"})
+
+
+def _context_keys(schema: Any) -> set[str] | None:
+    """The field names a ``context_schema`` declares, or None when they can't be read."""
+    import dataclasses
+
+    if dataclasses.is_dataclass(schema):
+        return {f.name for f in dataclasses.fields(schema) if f.init}
+    fields = getattr(schema, "model_fields", None)  # pydantic v2
+    if isinstance(fields, dict):
+        return set(fields)
+    if hasattr(schema, "__required_keys__"):  # TypedDict
+        return set(schema.__required_keys__) | set(schema.__optional_keys__)
+    return None
+
+
+def _run_context(graph: Any, context: Any) -> Any:
+    """Narrow the context ag-ui-langgraph builds from ``configurable`` (gh #217).
+
+    A graph with a ``context_schema`` gets only the keys it declares (a dataclass
+    rejects any other keyword, and a TypedDict or pydantic schema would carry
+    ``thread_id``). Otherwise the LangGraph-internal keys are dropped and the rest of
+    ``[configurable]`` is kept, as before.
+    """
+    if not isinstance(context, dict):
+        return context
+    keys = _context_keys(getattr(graph, "context_schema", None))
+    if keys is not None:
+        return {k: v for k, v in context.items() if k in keys}
+    return {k: v for k, v in context.items() if k not in _CONFIGURABLE_INTERNAL and not k.startswith("__")}
+
 
 def _agent_class(base: Any) -> Any:
     """The ``LangGraphAgent`` subclass :func:`build_agent` instantiates (cached per base).
@@ -140,6 +174,16 @@ def _agent_class(base: Any) -> Any:
                     return _schema_keys_without_pydantic(
                         self.graph, list(getattr(self, "constant_schema_keys", ["messages", "tools"]))
                     )
+
+            def get_stream_kwargs(self, *args, **kwargs):
+                out = super().get_stream_kwargs(*args, **kwargs)
+                if "context" in out:
+                    context = _run_context(self.graph, out["context"])
+                    if context:
+                        out["context"] = context
+                    else:
+                        del out["context"]
+                return out
 
         LangStageGraphAgent.__qualname__ = LangStageGraphAgent.__name__
         cls = _AGENT_CLASSES[base] = LangStageGraphAgent
@@ -1178,6 +1222,33 @@ async def _pending_interrupts(agent, thread_id) -> list:
     return out
 
 
+async def _checkpoint_tool_name(agent, thread_id, tool_call_id, cache: dict) -> str:
+    """A tool call's name from the thread's checkpoint, else ``"tool"`` (gh #215).
+
+    A resume run can finish a call that started in the interrupted turn (a HITL
+    *reject* never re-emits its ToolCallStart), so this run's ``tool_names`` lacks it.
+    Read once per run and best-effort, like :func:`_pending_interrupts`.
+    """
+    if "names" not in cache:
+        names: dict = {}
+        aget_state = getattr(getattr(agent, "graph", None), "aget_state", None)
+        if aget_state is not None:
+            try:
+                state = await aget_state({"configurable": {"thread_id": thread_id}})
+                values = getattr(state, "values", None)
+                for m in (values.get("messages") if isinstance(values, dict) else None) or ():
+                    for tc in getattr(m, "tool_calls", None) or ():
+                        if isinstance(tc, dict) and tc.get("id") and tc.get("name"):
+                            names[tc["id"]] = tc["name"]
+                    tcid, name = getattr(m, "tool_call_id", None), getattr(m, "name", None)
+                    if getattr(m, "type", None) == "tool" and tcid and name:
+                        names.setdefault(tcid, name)
+            except Exception:  # noqa: BLE001  # pragma: no cover - best-effort, never fatal
+                pass
+        cache["names"] = names
+    return cache["names"].get(tool_call_id, "tool")
+
+
 def _supports_agui_resume(agent) -> bool:
     """True when the installed AG-UI stack honors the standard ``RunAgentInput.resume[]``.
 
@@ -1452,6 +1523,7 @@ async def iter_event_frames(
     )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     interrupt_cache: dict = {}  # pending interrupts, read once per run (vscode #114)
+    name_cache: dict = {}  # names of calls started in an earlier turn (gh #215)
 
     streamed_text = False
     # Message ids already emitted token-by-token (from TextMessageContentEvent), so
@@ -1563,7 +1635,8 @@ async def iter_event_frames(
             elif t == "ToolCallResultEvent":
                 streamed_result_ids.add(ev.tool_call_id)
                 result = _truncate_result(str(getattr(ev, "content", "")), max_result_len)
-                name = tool_names.get(ev.tool_call_id, "tool")
+                name = tool_names.get(ev.tool_call_id) or await _checkpoint_tool_name(
+                    agent, thread_id, ev.tool_call_id, name_cache)
                 is_error, duration_ms = tools.result(
                     ev.tool_call_id, name, ev.tool_call_id in stream.errored_result_ids
                 )
@@ -1739,6 +1812,7 @@ async def iter_chunk_frames(
     )
     resume = _unwrap_resume(resume)  # accept create_resume_input()'s Command too (gh #82)
     interrupt_cache: dict = {}  # pending interrupts, read once per run (vscode #114)
+    name_cache: dict = {}  # names of calls started in an earlier turn (gh #215)
 
     streamed_text = False
     # Message ids already streamed token-by-token, so the final snapshot can emit the
@@ -1831,7 +1905,8 @@ async def iter_chunk_frames(
                 # display-passthrough one is fed the capped result (gh #106).
                 streamed_result_ids.add(ev.tool_call_id)
                 result = _truncate_result(getattr(ev, "content", ""), max_result_len)
-                name = tool_names.get(ev.tool_call_id, "tool")
+                name = tool_names.get(ev.tool_call_id) or await _checkpoint_tool_name(
+                    agent, thread_id, ev.tool_call_id, name_cache)
                 is_error, duration_ms = tools.result(
                     ev.tool_call_id, name, ev.tool_call_id in stream.errored_result_ids
                 )

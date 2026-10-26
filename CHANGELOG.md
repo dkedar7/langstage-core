@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.53] - 2026-10-26
+
+### Fixed
+- **Agents with a dataclass `context_schema` work on every stage (gh #217).** ag-ui-langgraph
+  copies all of `configurable` into the LangGraph run `context`, so `thread_id` reached the
+  schema and a dataclass failed every turn with `TypeError: Context.__init__() got an
+  unexpected keyword argument 'thread_id'`. A TypedDict or pydantic context also carried
+  `thread_id`. The bridge now passes only the keys the `context_schema` declares; without a
+  schema it drops LangGraph's own keys (`thread_id`, `checkpoint_*`) and keeps the rest of
+  `[configurable]` as before. `thread_id` still reaches the checkpointer through `config`.
+- **A rejected HITL tool call is reported under its real name (gh #215).** On a reject
+  resume the call started in the interrupted turn, so `tool_end` (event wire) and
+  `tool_result` (chunk wire) said `name: "tool"`. Both wires now read the name from the
+  thread's checkpoint when this run never saw the call start.
+- **The PyPI summary describes 1.0 (gh #216).** It still advertised the retired
+  "universal parser" and "typed stream events".
+
 ## [1.0.52] - 2026-10-21
 
 ### Fixed
