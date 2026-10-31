@@ -19,6 +19,7 @@ ADR 0004.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,7 +58,7 @@ async def averify(
     agent_or_graph: Any,
     *,
     message: str = DEFAULT_VERIFY_MESSAGE,
-    thread_id: str = "verify",
+    thread_id: str | None = None,
     timeout: float = 60.0,
     state: Any = None,
 ) -> VerifyResult:
@@ -68,7 +69,9 @@ async def averify(
             ``LangGraphAgent`` (see :func:`build_agent`) — both accepted so a
             surface can verify whatever it already holds.
         message: The probe message. Defaults to a trivial model-agnostic prompt.
-        thread_id: Checkpoint thread for the probe turn (kept off real threads).
+        thread_id: Checkpoint thread for the probe turn. Defaults to a fresh
+            ``verify-<uuid>`` per call, so probes never share history or a pending
+            interrupt through an agent's own durable checkpointer (gh #221).
         timeout: Seconds to wait for the turn to finish before failing.
         state: Optional extra graph input (e.g. an agent with a richer contract
             than ``messages``), forwarded to :func:`iter_event_frames`.
@@ -85,6 +88,9 @@ async def averify(
     # (gh #119); a tool-call-only or reasoning turn is NOT empty (it did work), so it
     # counts here even with zero content chars.
     saw_output = False
+
+    if thread_id is None:
+        thread_id = f"verify-{uuid.uuid4().hex}"
 
     async def _run() -> None:
         nonlocal saw_interrupt, saw_output

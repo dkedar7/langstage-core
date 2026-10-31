@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.55] - 2026-10-31
+
+### Fixed
+- **`langstage-agui -m` / `--json` / `--verify` run each invocation on a fresh thread (gh #221).**
+  They used the constant threads `"oneshot"` and `"verify"`. With an agent that brings its own
+  durable checkpointer (SQLite, Postgres), every run saw the earlier runs' history, and one run
+  that paused on an interrupt left every later `-m` replaying that interrupt (exit 2) until the
+  rows were deleted by hand. Each invocation now gets `oneshot-<uuid>` / `verify-<uuid>`, the
+  rule `run_turn` already followed (gh #163). `verify()` / `averify()` default to a fresh
+  `verify-<uuid>` thread too; an explicit `thread_id=` is still used as given.
+
 ## [1.0.54] - 2026-10-30
 
 ### Fixed
