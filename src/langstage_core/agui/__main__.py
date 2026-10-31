@@ -261,6 +261,15 @@ def main(argv: list[str] | None = None) -> int:
 
     from ..console import safe_print
 
+    # `--path agui` registered a route no request could reach, behind a success banner
+    # with a malformed URL (http://localhost:8771agui). Normalise it once here so the
+    # banner and the route agree, and reject what can't be a route. (gh #219)
+    from . import normalize_endpoint_path
+
+    try:
+        args.path = normalize_endpoint_path(args.path)
+    except ValueError as exc:
+        return usage_error(parser, f"--path: {exc}")
     if args.show_config:
         # The AG-UI server consumes agent_spec/host/port, and debug (it gates the
         # traceback on error frames, gh #137). Drop the inherited workspace_root/title
