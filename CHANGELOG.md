@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.54] - 2026-10-30
+
+### Fixed
+- **An endpoint path without a leading slash is reachable (gh #219).** `langstage-agui --path agui`,
+  `build_app(..., path="agui")`, `serve(...)` and `add_agui_endpoint(...)` registered a route no
+  request could match, so every request got a 404 behind a success banner with a malformed URL
+  (`http://localhost:8771agui`). Paths are now normalised (`agui`, `/agui/`, `//agui` and
+  ` /agui ` all become `/agui`, and an empty path becomes `/`), so the banner and the route agree.
+  A path that can't be a plain route (spaces, `?`, `#`, `{param}`, `.`/`..` segments) is refused:
+  a usage error (exit 64) from the CLI and a `ValueError` from the Python API. The new
+  `langstage_core.agui.normalize_endpoint_path()` does this.
+
 ## [1.0.53] - 2026-10-26
 
 ### Fixed

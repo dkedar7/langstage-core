@@ -57,6 +57,25 @@ _IMPORT_HINT = (
 )
 
 
+def normalize_endpoint_path(path: str | None) -> str:
+    """Return the endpoint path as a route Starlette can match.
+
+    ``"agui"``, ``"/agui/"``, ``"//agui"`` and ``" /agui "`` all become ``"/agui"``;
+    ``""`` and ``None`` become ``"/"``. A path that can't be a plain route (spaces,
+    ``?``, ``#``, ``{param}``, ``.``/``..`` segments) raises ``ValueError``. A path
+    without its leading slash used to register a route no request could reach,
+    behind a success banner (gh #219).
+    """
+    raw = (path or "").strip()
+    segments = [seg for seg in raw.split("/") if seg]
+    for seg in segments:
+        if seg in (".", "..") or any(ch.isspace() or ch in "?#{}" for ch in seg):
+            raise ValueError(
+                f"invalid endpoint path {path!r}: use a plain path like '/' or '/agui'"
+            )
+    return "/" + "/".join(segments)
+
+
 def ensure_available() -> None:
     """Raise the agui-extra ``RuntimeError`` if the AG-UI server deps are missing.
 
@@ -309,6 +328,7 @@ def add_agui_endpoint(
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(_IMPORT_HINT) from e
 
+    path = normalize_endpoint_path(path)
     agent = graph if _is_langgraph_agent(graph) else build_agent(
         graph, name=name, description=description, config=config
     )
