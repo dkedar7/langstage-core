@@ -1,6 +1,6 @@
 [project]
 name = "langstage-core"
-version = "1.0.54"
+version = "1.0.55"
 description = "Shared core for LangStage: a host layer for LangGraph agents (spec loading + layered config), an in-process AG-UI bridge for any CompiledGraph, an async task-delegation engine, and interrupt-aware input helpers"
 readme = "README.md"
 license = {text = "MIT"}

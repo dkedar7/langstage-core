@@ -80,10 +80,18 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
                 safe_write(tb if tb.endswith("\n") else tb + "\n", sys.stderr)
         return _exit_code_for("error")
 
+    # A fresh thread per invocation (gh #221): a constant "oneshot" thread shared every
+    # run's history through an agent's own durable checkpointer, and one paused run
+    # left every later `-m` replaying that interrupt (exit 2). Same rule as run_turn
+    # (gh #163); the CLI has no option to continue a thread, so nothing relied on it.
+    import uuid
+
+    thread_id = f"oneshot-{uuid.uuid4().hex}"
+
     if as_json:
         import json
 
-        result = asyncio.run(collect_chunk_frames(agent, message, "oneshot"))
+        result = asyncio.run(collect_chunk_frames(agent, message, thread_id))
         print(json.dumps({
             "text": result.text,
             "outcome": result.outcome,
@@ -102,7 +110,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
         nonlocal outcome
         wrote_text = False
         text = TextJoiner()  # paragraph break at each message boundary (gh #200)
-        async for chunk in iter_chunk_frames(agent, message, "oneshot"):
+        async for chunk in iter_chunk_frames(agent, message, thread_id):
             status = chunk.get("status")
             if status == "streaming" and "chunk" in chunk:
                 # Model text is arbitrary Unicode: escape what the console can't
