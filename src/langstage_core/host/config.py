@@ -27,6 +27,7 @@ Discoverability: ``HostConfig.resolve().describe()`` (or
 from, and the env var / TOML key that sets it — so you never have to remember
 the variable names.
 """
+import difflib
 import os
 import re
 import sys
@@ -442,6 +443,10 @@ def _flatten_toml_keys(data: dict, prefix: str = "") -> list[str]:
 class HostConfig:
     """Shared configuration for deep-agent hosts.
 
+    Get a resolved config with ``HostConfig.resolve()``. ``HostConfig()`` holds only
+    the defaults (no env, no TOML), and ``from_env()`` skips TOML, so
+    ``config_issues()`` on either never sees a broken ``langstage.toml`` (gh #223).
+
     Subclass to add host-specific fields and extend the ``_ENV`` / ``_TOML``
     maps so they resolve through the same chain:
 
@@ -558,7 +563,9 @@ class HostConfig:
     def from_env(cls) -> "HostConfig":
         """Resolve from env vars + defaults only (no TOML, no overrides).
 
-        Kept for back-compat; ``resolve()`` is the fuller entry point.
+        Kept for back-compat; ``resolve()`` is the fuller entry point. Because no TOML
+        is read, ``config_issues()`` on the result never reports a TOML problem: use
+        ``HostConfig.resolve()`` for a ``--strict`` gate (gh #223).
         """
         return cls.resolve(use_toml=False)
 
@@ -790,6 +797,23 @@ class HostConfig:
                 out[dotted] = leaf
         return out
 
+    def _typo_hints(self) -> dict[str, str]:
+        """Unknown dotted keys that look like a typo of a real key -> that key.
+
+        ``agent.spce`` -> ``agent.spec`` (gh #223). Misplaced bare keys are left to
+        :meth:`_misplaced_bare_keys`, which explains the actual fix.
+        """
+        valid = sorted(set(type(self)._toml_map().values()))
+        misplaced = self._misplaced_bare_keys()
+        out: dict[str, str] = {}
+        for dotted in self.unknown_toml_keys():
+            if dotted in misplaced:
+                continue
+            match = difflib.get_close_matches(dotted, valid, n=1, cutoff=0.8)
+            if match:
+                out[dotted] = match[0]
+        return out
+
     def _note_misplaced_bare_keys(self) -> None:
         """Print the one-line runtime note for each misplaced bare key (gh #139).
 
@@ -854,7 +878,8 @@ class HostConfig:
         - ``invalid_value`` — same keys: a value that failed a semantic validator
           (e.g. an out-of-range port), degraded to the default.
         - ``unknown_toml_key`` — ``key``, ``did_you_mean`` (the bare key a misplaced
-          ``[table].key`` was meant to be, else ``None``): a key no field reads.
+          ``[table].key`` was meant to be, or the real key a typo is closest to, else
+          ``None``): a key no field reads.
 
         Empty means clean. Unlike the stderr notes (deduped per process), this is
         computed per ``resolve()``, so it is reliable no matter how many resolves ran.
@@ -868,11 +893,14 @@ class HostConfig:
             })
         issues.extend(getattr(self, "_value_issues", []))
         misplaced = self._misplaced_bare_keys()
+        typos = self._typo_hints()
         for key in self.unknown_toml_keys():
-            hint = misplaced.get(key)
+            hint = misplaced.get(key) or typos.get(key)
             msg = f"unknown TOML key {key} ignored"
-            if hint:
+            if key in misplaced:
                 msg += f" ('{hint}' is top-level: move it above every [table] header)"
+            elif hint:
+                msg += f" (did you mean {hint}?)"
             issues.append({
                 "kind": "unknown_toml_key",
                 "key": key,
@@ -1047,6 +1075,8 @@ class HostConfig:
             lines.append(
                 "  unknown TOML keys (ignored - a typo or wrong table?): " + ", ".join(unknown)
             )
+            for dotted, real in self._typo_hints().items():
+                lines.append(f"    {dotted}: did you mean {real}?")
             for dotted, bare in self._misplaced_bare_keys().items():
                 lines.append(
                     f"    {dotted}: '{bare}' is a top-level key - move it to the top of "

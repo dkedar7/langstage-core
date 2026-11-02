@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.56] - 2026-11-02
+
+### Fixed
+- **The README shows how to get a resolved config: `HostConfig.resolve()` (gh #223).** It
+  documented `config_issues()` as the input for a `--strict` gate but never named `resolve()`,
+  so the obvious guesses, `HostConfig()` (defaults only) and `HostConfig.from_env()` (no TOML),
+  returned `[]` for a broken `langstage.toml`. The Configuration section now has a short
+  `resolve()` example and says what the other two skip; the class and `from_env()` docstrings
+  say the same. No behavior change for existing callers.
+- **A typo'd TOML key gets a `did_you_mean` (gh #223).** `agent.spce` now reports
+  `did_you_mean: "agent.spec"` in `config_issues()`, and `describe()` / `--show-config` print
+  `agent.spce: did you mean agent.spec?`. A misplaced top-level key (`server.debug`) keeps its
+  existing hint.
+
 ## [1.0.55] - 2026-10-31
 
 ### Fixed

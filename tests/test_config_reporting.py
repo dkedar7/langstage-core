@@ -292,6 +292,43 @@ class TestMisplacedBareKey:
         assert "note:" not in capsys.readouterr().err
 
 
+class TestTypoHintAndResolveEntryPoint:
+    """gh #223: a typo'd key gets a did_you_mean, and only resolve() sees the TOML."""
+
+    def test_typo_gets_did_you_mean(self, isolated_global, tmp_path):
+        proj = _proj(tmp_path, '[agent]\nspce = "my_agent.py:graph"\n')
+        [issue] = HostConfig.resolve(env={}, toml_start=proj).config_issues()
+        assert issue["key"] == "agent.spce" and issue["did_you_mean"] == "agent.spec"
+        assert "did you mean agent.spec?" in issue["message"]
+
+    def test_describe_shows_the_typo_hint(self, isolated_global, tmp_path):
+        proj = _proj(tmp_path, '[agent]\nspce = "my_agent.py:graph"\n')
+        text = HostConfig.resolve(env={}, toml_start=proj).describe()
+        assert "agent.spce: did you mean agent.spec?" in text
+
+    def test_unrelated_key_has_no_hint(self, isolated_global, tmp_path):
+        proj = _proj(tmp_path, '[agent]\nzzzzzz = 1\n')
+        [issue] = HostConfig.resolve(env={}, toml_start=proj).config_issues()
+        assert issue["did_you_mean"] is None
+
+    def test_misplaced_bare_key_hint_wins(self, isolated_global, tmp_path):
+        proj = _proj(tmp_path, '[server]\ndebug = true\n')
+        [issue] = HostConfig.resolve(env={}, toml_start=proj).config_issues()
+        assert issue["did_you_mean"] == "debug" and "top-level" in issue["message"]
+
+    def test_only_resolve_reads_the_toml(self, isolated_global, tmp_path, monkeypatch):
+        proj = _proj(tmp_path, '[agent]\nspce = "my_agent.py:graph"\n')
+        monkeypatch.chdir(proj)
+        # The documented contract: defaults-only and env-only configs never see the TOML.
+        assert HostConfig().config_issues() == []
+        assert HostConfig.from_env().config_issues() == []
+        assert [i["key"] for i in HostConfig.resolve().config_issues()] == ["agent.spce"]
+
+    def test_readme_shows_resolve(self):
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        assert "HostConfig.resolve()" in readme
+
+
 class TestTomlBoolCoercion:
     @pytest.mark.parametrize("raw,expected", [
         ('"false"', False), ('"no"', False), ('"0"', False), ('"off"', False),

@@ -251,7 +251,7 @@ Everything is re-exported from the top-level `langstage_core` package (except th
 
 | Area | API | What it does |
 |---|---|---|
-| **Host** | `load_agent_spec`, `HostConfig`, `Workspace` | Load a graph from a `module:attr` / `file.py:attr` spec; resolve layered config (defaults < `langstage.toml` < `LANGSTAGE_*` env < overrides). |
+| **Host** | `load_agent_spec`, `HostConfig`, `Workspace` | Load a graph from a `module:attr` / `file.py:attr` spec; resolve layered config with `HostConfig.resolve()` (defaults < `langstage.toml` < `LANGSTAGE_*` env < overrides). |
 | **AG-UI bridge** (`langstage_core.agui`) | `build_agent`, `iter_event_frames`, `iter_chunk_frames`, `collect_event_frames` / `collect_chunk_frames` / `run_turn` (→ `TurnResult`), `build_app`, `serve`, `add_agui_endpoint` | Stream any `CompiledGraph` in-process (the `iter_*` mappings), collect one turn into a typed `TurnResult` (the `collect_*` / `run_turn` one-shots), or serve it as an AG-UI HTTP endpoint. |
 | **Session adapter** (top-level; also `langstage_core.adapters`) | `SessionAdapter`, `Session` | A session-scoped driver over the AG-UI agent with a typed terminal `outcome` — the streaming engine behind the web app + task board. |
 | **Input helpers** | `prepare_agent_input`, `create_resume_input`, `normalize_decision`, `is_allowed_decision` | Build graph input from a message (+ optional context) or a resume decision; check a decision verb against an interrupt's `allowed_decisions`. |
@@ -325,13 +325,25 @@ python -m langstage_core.host      # every shared key
 langstage-agui --show-config       # each surface's --show-config: the keys that surface uses
 ```
 
+From Python, `HostConfig.resolve()` runs the same chain:
+
+```python
+from langstage_core import HostConfig
+
+cfg = HostConfig.resolve()      # defaults < langstage.toml < LANGSTAGE_* env < overrides=
+if cfg.config_issues():         # a --strict gate: fail on anything ignored or degraded
+    raise SystemExit(1)
+```
+
+`HostConfig()` holds only the defaults (no env, no TOML) and `HostConfig.from_env()` skips the TOML layer, so `config_issues()` on either never reports a broken `langstage.toml`. Use `resolve()`.
+
 A surface's `--show-config` leaves out keys it ignores, and says so on a `(not used by this surface, so not shown: ...)` line. `langstage-agui` omits `workspace_root` and `title`; `--show-config --json` lists them under `omitted`.
 
 What the diagnostic tells you:
 
 - **Every contributing file.** `TOML read from:` lists the global `~/.langstage/config.toml` and the project `langstage.toml`; `config_dict()["toml"]["paths"]` is the same list as data.
 - **A malformed file is reported as malformed, not missing.** A `langstage.toml` that doesn't parse is ignored entirely (every key falls back to env/defaults) and shows as `TOML: <path> is MALFORMED and was ignored entirely (<parse error>)`. In `config_dict()` it appears as `toml.found: true`, `toml.malformed: true`, and `toml.malformed_files: [{path, error}]`.
-- **Anything ignored or degraded, as data.** `HostConfig.config_issues()` (and `config_dict()["issues"]`) lists each malformed file, each wrong-type or invalid value that fell back to a default, and each unknown key. An empty list means the config is clean, so a surface's `--strict` gate can fail when the list isn't empty.
+- **Anything ignored or degraded, as data.** `HostConfig.config_issues()` (and `config_dict()["issues"]`) lists each malformed file, each wrong-type or invalid value that fell back to a default, and each unknown key (with a `did_you_mean` for a likely typo such as `agent.spce`). An empty list means the config is clean, so a surface's `--strict` gate can fail when the list isn't empty.
 - **`debug` is a top-level key.** In TOML, `debug = true` must come *before* the first `[table]` header. Written below `[server]`, TOML reads it as `server.debug`. That key is ignored, and a `note:` saying so is printed at startup.
 - **A rejected value falls back one layer, not to the default.** A value that fails a check (an out-of-range `LANGSTAGE_PORT`, say) is ignored with a `note:`, and the next layer down is used: the `langstage.toml` value if one is set, else the default. A bad `--port` typed on the command line is a usage error (exit 64) instead.
 - **Secrets are never printed.** `--show-config` and `config_dict()` show that a credential field (`auth_password`, any `*_password`, `*_secret`, `*_token`, `*_api_key`, or one a surface lists in `_SECRETS`) is set and where it came from, but print `********` in place of its value. The same rule covers credential-named keys in `[configurable]` (`api_key`, `db_password`, ... at any depth); the graph still receives the real values.
