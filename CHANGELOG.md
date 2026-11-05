@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.57] - 2026-11-05
+
+### Fixed
+- **A text setting in `langstage.toml` is type-checked (gh #225).** A `str` field used to
+  accept any TOML type, so `[server] host = true` (or a float, table, array or date) resolved
+  as a live value, `config_issues()` was empty, and `langstage-agui` could crash with a raw
+  `TypeError` at bind time. Such a value is now a `malformed_value`: a `note:`, a fallback to
+  the layer beneath, and a `config_issues()` entry, like quoted numbers and bools. An unquoted
+  integer is kept as its digits (`host = 127` is `"127"`, which now fails at bind with the
+  usual one-line error), so a numeric token or password isn't dropped to its default.
+- **`overrides=` and `merge()` coerce like TOML (gh #225).** `resolve(overrides={"debug":
+  "false"})` and `merge(debug="off")` gave the truthy str, so debug was on while
+  `--show-config` printed `false`. Overrides now go through the same coercion; an
+  uncoercible one keeps the layer beneath, prints a note, and is listed in `config_issues()`
+  with source `override`. A path object passed for a text field becomes its string.
+
 ## [1.0.56] - 2026-11-02
 
 ### Fixed
