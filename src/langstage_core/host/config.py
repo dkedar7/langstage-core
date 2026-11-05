@@ -715,7 +715,19 @@ class HostConfig:
                         _accept(cast, f"env:{used}")
 
             if name in overrides:
-                _accept(overrides[name], "override")
+                # Overrides (CLI flags, Python kwargs) go through the same coercion as
+                # TOML (gh #225): ``overrides={"debug": "false"}`` used to stay the
+                # truthy str 'false', so debug was ON while --show-config said false.
+                ov = overrides[name]
+                try:
+                    coerced = _coerce(f, ov)
+                except (ValueError, TypeError) as exc:
+                    _warn_malformed_override(name, ov, exc, val, src)
+                    value_issues.append(_value_issue(
+                        "malformed_value", name, "override", ov, exc, val
+                    ))
+                else:
+                    _accept(coerced, "override")
 
             if kind is not None and toml_dir is not None and src.startswith("toml"):
                 toml_dirs[name] = toml_dir
@@ -736,9 +748,26 @@ class HostConfig:
 
     def merge(self, **overrides: Any) -> "HostConfig":
         """Return a copy with non-``None`` overrides applied."""
-        valid = {f.name for f in fields(self)}
-        applied = {k: v for k, v in overrides.items() if v is not None and k in valid}
-        return replace(self, **applied)
+        by_name = {f.name: f for f in fields(self)}
+        applied: dict[str, Any] = {}
+        issues: list[dict] = []
+        for k, v in overrides.items():
+            if v is None or k not in by_name:
+                continue
+            # Same coercion as resolve()'s override layer (gh #225): merge(debug="off")
+            # is False, and an uncoercible value keeps the current one + a note.
+            try:
+                applied[k] = _coerce(by_name[k], v)
+            except (ValueError, TypeError) as exc:
+                current = getattr(self, k)
+                _warn_malformed_override(k, v, exc, current, self.sources.get(k, "default"))
+                issues.append(_value_issue("malformed_value", k, "override", v, exc, current))
+        merged = replace(self, **applied)
+        if issues:
+            merged._value_issues = [  # type: ignore[attr-defined]
+                *getattr(self, "_value_issues", []), *issues
+            ]
+        return merged
 
     # ---- introspection ----
 
@@ -873,7 +902,7 @@ class HostConfig:
         Each issue is a dict with ``kind`` and a one-line ``message``, plus:
 
         - ``malformed_toml`` — ``path``, ``error``: a config file that didn't parse.
-        - ``malformed_value`` — ``field``, ``source`` (``toml:<key>`` / ``env:<VAR>``),
+        - ``malformed_value`` — ``field``, ``source`` (``toml:<key>`` / ``env:<VAR>`` / ``override``),
           ``value``, ``error``, ``used``: a value of the wrong type, degraded.
         - ``invalid_value`` — same keys: a value that failed a semantic validator
           (e.g. an out-of-range port), degraded to the default.
@@ -1188,8 +1217,24 @@ def _is_bool_field(f: Any) -> bool:
     return isinstance(getattr(f, "default", None), bool)
 
 
+def _is_str_field(f: Any) -> bool:
+    """True if the field declares plain text: ``str`` or ``str | None`` (annotation
+    first, then a ``str`` default)."""
+    ann = getattr(f, "type", None)
+    if ann is str:
+        return True
+    if isinstance(ann, str):
+        return ann.replace(" ", "") in ("str", "str|None", "None|str", "Optional[str]")
+    if isinstance(ann, type):  # declared as something else (int, Path, dict, ...)
+        return False
+    if ann is not None:  # a typing construct: Optional[str] / str | None
+        args = set(getattr(ann, "__args__", ()) or ())
+        return bool(args) and args <= {str, type(None)} and str in args
+    return isinstance(getattr(f, "default", None), str)
+
+
 def _coerce(f: Any, value: Any) -> Any:
-    """Coerce a TOML value to the field's declared shape (Path and numeric fields).
+    """Coerce a TOML or override value to the field's declared shape (Path, bool, numeric, text).
 
     TOML is typed, but nothing checked that a value's type matched the field it
     landed in — only ``Path`` fields were coerced, and everything else was passed
@@ -1242,6 +1287,23 @@ def _coerce(f: Any, value: Any) -> Any:
         if numeric is int and float(value) != coerced:
             raise ValueError(f"expected int, got non-integral {value!r}")
         return coerced
+
+    if _is_str_field(f):
+        # The text sibling (gh #225): a text field used to accept ANY TOML type, so
+        # ``host = 127`` resolved to the int 127, config_issues() was empty, and
+        # langstage-agui died with a raw TypeError at bind time. An integer is kept as
+        # its digits (``jupyter_token = 12345`` / ``auth_password = 123456`` mean the
+        # text the user typed; rejecting them would drop a password to the default
+        # and turn auth OFF). A path object is text too. Anything else (a bool, a
+        # float, a table, an array, a date) is malformed: resolve() degrades it to the
+        # layer beneath + note + a config_issues() entry.
+        if isinstance(value, str):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+        if isinstance(value, os.PathLike):
+            return os.fspath(value)
+        raise TypeError(f"expected text, got {type(value).__name__} {value!r} (quote it)")
     return value
 
 
@@ -1295,6 +1357,24 @@ def _warn_invalid_value(
     kept_desc = f"default {kept!r}" if kept_src == "default" else f"{kept!r} ({kept_src})"
     print(
         f"note: ignoring invalid {field}={value!r} "
+        f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
+        file=sys.stderr,
+    )
+
+
+def _warn_malformed_override(
+    field: str, value: Any, exc: Exception, kept: Any, kept_src: str = "default"
+) -> None:
+    """One-line stderr note when an override (a CLI flag / Python kwarg passed as
+    ``overrides=`` or to :meth:`HostConfig.merge`) can't be coerced to its field's type
+    (gh #225). Same shape as the env and TOML notes; deduped per process."""
+    dedupe = ("override:" + field, repr(value))
+    if dedupe in _warned_invalid_value:
+        return
+    _warned_invalid_value.add(dedupe)
+    kept_desc = f"default {kept!r}" if kept_src == "default" else f"{kept!r} ({kept_src})"
+    print(
+        f"note: ignoring malformed override {field}={value!r} "
         f"({type(exc).__name__}: {exc}); using {kept_desc} instead.",
         file=sys.stderr,
     )
