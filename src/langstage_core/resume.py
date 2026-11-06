@@ -225,3 +225,101 @@ def canonicalize_resume(resume: Any) -> Any:
                 changed = True
         out.append(d)
     return {**resume, "decisions": out} if changed else resume
+
+
+class InvalidDecisionError(ValueError):
+    """A resume the pending HumanInTheLoopMiddleware request would refuse (gh #227).
+
+    ``iter_event_frames`` / ``iter_chunk_frames`` and the served endpoint raise it, as a
+    terminal ``error`` frame / ``RUN_ERROR``, *before* anything reaches the graph: a
+    refused answer that did reach it stayed on the thread and was replayed on every
+    later resume. The thread is left as it was, so the same interrupt can be answered
+    again.
+    """
+
+
+def _is_hitl_request(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("action_requests"), list)
+
+
+def _allowed_for(i: int, action: Any, interrupt: dict) -> list:
+    """The verbs allowed for action ``i``: its own review_config, else the interrupt's."""
+    configs = interrupt.get("review_configs") or []
+    if not isinstance(configs, list):
+        configs = []
+    actions = interrupt.get("action_requests") or []
+    name = action.get("name") if isinstance(action, dict) else None
+    # HumanInTheLoopMiddleware builds review_configs index-aligned with action_requests.
+    rc = configs[i] if len(configs) == len(actions) and i < len(configs) else next(
+        (c for c in configs if isinstance(c, dict) and c.get("action_name") == name), None
+    )
+    allowed = rc.get("allowed_decisions") if isinstance(rc, dict) else None
+    if allowed is None:
+        allowed = interrupt.get("allowed_decisions")
+    return list(allowed) if isinstance(allowed, (list, tuple)) and allowed else list(DECISION_VERBS)
+
+
+def decision_problems(resume: Any, interrupt: Any) -> list[str]:
+    """What is wrong with ``resume`` as the answer to ``interrupt``; ``[]`` when it's fine.
+
+    ``interrupt`` is a LangChain HumanInTheLoopMiddleware request (``action_requests``
+    plus ``review_configs``), either the graph's own value or an ``interrupt`` frame.
+    The checks are the middleware's own: a ``{"decisions": [...]}`` envelope with one
+    decision per action, each a type that action allows (aliases such as ``accept``
+    count), an ``edit`` carrying ``edited_action`` ``{"name": str, "args": dict}``, a
+    ``respond`` carrying a text ``message``. Any other interrupt (a legacy
+    ``HumanInterrupt`` list, a custom ``interrupt(...)``) reads its own payload, so it
+    is never checked here and always returns ``[]``.
+
+    Surfaces can call it to re-prompt before resuming::
+
+        problems = decision_problems({"decisions": decisions}, frame)
+        if problems:
+            ...  # show them and ask again
+    """
+    if not _is_hitl_request(interrupt):
+        return []
+    actions = interrupt["action_requests"]
+    if not isinstance(resume, dict) or not isinstance(resume.get("decisions"), list):
+        return [
+            (
+                'the answer must be {"decisions": [...]}, one decision per action; '
+                f"got {type(resume).__name__}"
+            )
+        ]
+    decisions = resume["decisions"]
+    if len(decisions) != len(actions):
+        return [f"{len(actions)} action(s) are waiting for a decision but {len(decisions)} were sent"]
+    problems: list[str] = []
+    for i, (decision, action) in enumerate(zip(decisions, actions)):
+        name = action.get("name") if isinstance(action, dict) else None
+        where = f"decision {i + 1}" + (f" ({name})" if name else "")
+        if not isinstance(decision, dict):
+            problems.append(f'{where}: must be an object like {{"type": "approve"}}')
+            continue
+        allowed = _allowed_for(i, action, interrupt)
+        verb = normalize_decision(decision.get("type"), allowed)
+        if verb is None:
+            problems.append(
+                f"{where}: type {decision.get('type')!r} is not allowed; "
+                f"allowed: {', '.join(map(str, allowed))}"
+            )
+            continue
+        if verb == "edit":
+            ea = decision.get("edited_action")
+            if not (
+                isinstance(ea, dict) and isinstance(ea.get("name"), str) and ea["name"]
+                and isinstance(ea.get("args"), dict)
+            ):
+                problems.append(
+                    f'{where}: edit needs "edited_action": {{"name": "<tool>", "args": {{...}}}}'
+                )
+        elif verb == "respond" and not isinstance(decision.get("message"), str):
+            problems.append(f'{where}: respond needs a text "message"')
+        elif (
+            verb == "reject"
+            and decision.get("message") is not None
+            and not isinstance(decision["message"], str)
+        ):
+            problems.append(f'{where}: a reject "message" must be text')
+    return problems

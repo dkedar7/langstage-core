@@ -345,6 +345,13 @@ def add_agui_endpoint(
 
         async def gen():
             try:
+                # Refuse a decision the pending approval would reject, before the
+                # graph sees it, and unstick a thread an earlier one left (gh #227).
+                has_resume, payload, single = _served_resume(input_data)
+                if has_resume:
+                    await _check_resume(
+                        run_agent, input_data.thread_id, payload, validate=single
+                    )
                 # _TurnStream: a node that returns a finished (non-token-streamed)
                 # AIMessage used to reach a served client ONLY inside the closing
                 # MESSAGES_SNAPSHOT (zero TEXT_MESSAGE_* events), while the in-process
@@ -1288,6 +1295,80 @@ def _supports_agui_resume(agent) -> bool:
     )
 
 
+async def _check_resume(agent, thread_id, resume, *, validate: bool = True) -> list:
+    """Check a resume against the thread's pending approval, then unstick the thread.
+
+    Returns the thread's pending ``Interrupt`` objects, read before anything changes.
+
+    - **Validation:** when exactly one interrupt is pending and it is a
+      HumanInTheLoopMiddleware request, ``resume`` must be an answer the middleware
+      accepts (:func:`~langstage_core.resume.decision_problems`). Otherwise
+      :class:`~langstage_core.resume.InvalidDecisionError` is raised and nothing is
+      sent or saved. A refused answer that reached the graph used to stay on the
+      thread and be replayed on every later resume, so the approval could never be
+      answered again (gh #227, cli #195).
+    - **Recovery:** a thread already stuck that way (an interrupted task that failed
+      on its last answer, e.g. under an older version) gets an empty state update,
+      which drops the stale answer; the paused step runs again and takes this one.
+
+    Best-effort like :func:`_pending_interrupts`: an agent without a ``.graph``, a
+    graph without a checkpointer, or a failed read checks nothing.
+    """
+    graph = getattr(agent, "graph", None)
+    aget_state = getattr(graph, "aget_state", None)
+    if aget_state is None:
+        return []
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = await aget_state(config)
+    except Exception:  # noqa: BLE001  # pragma: no cover - best-effort, never fatal
+        return []
+    tasks = getattr(state, "tasks", None) or ()
+    pending = [i for t in tasks for i in (getattr(t, "interrupts", None) or ())]
+    if validate and len(pending) == 1:
+        from ..resume import InvalidDecisionError, decision_problems
+
+        problems = decision_problems(resume, getattr(pending[0], "value", None))
+        if problems:
+            raise InvalidDecisionError(
+                "; ".join(problems) + ". Nothing was sent; answer the approval again."
+            )
+    stuck = any(getattr(t, "interrupts", None) and getattr(t, "error", None) for t in tasks)
+    if stuck and callable(getattr(graph, "aupdate_state", None)):
+        try:
+            await graph.aupdate_state(config, None)
+        except Exception:  # noqa: BLE001  # pragma: no cover - leave the thread as it is
+            pass
+    return pending
+
+
+def _served_resume(input_data) -> tuple:
+    """``(has_resume, payload, single)`` for a served ``RunAgentInput`` (gh #227).
+
+    The payload rides ``resume[]`` (one resolved entry is the plain answer the adapter
+    hands the graph) or the legacy ``forwarded_props.command.resume``, whose string
+    form the adapter JSON-decodes. ``single`` is False when several entries, or a
+    cancelled one, make the graph's value something other than that payload.
+    """
+    import json
+
+    entries = list(getattr(input_data, "resume", None) or ())
+    if entries:
+        if len(entries) == 1 and getattr(entries[0], "status", None) == "resolved":
+            return True, getattr(entries[0], "payload", None), True
+        return True, None, False
+    command = (getattr(input_data, "forwarded_props", None) or {}).get("command")
+    if isinstance(command, dict) and command.get("resume") is not None:
+        payload = command["resume"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                pass
+        return True, payload, True
+    return False, None, False
+
+
 async def _resume_input_fields(agent, thread_id, resume) -> dict:
     """The ``RunAgentInput`` kwargs that carry ``resume`` to the adapter (gh #144).
 
@@ -1314,7 +1395,10 @@ async def _resume_input_fields(agent, thread_id, resume) -> dict:
     """
     if resume is None:
         return {"forwarded_props": {}}
-    pending = None
+    # Refuse an answer the pending approval would reject, and clear a refused one an
+    # earlier resume left on the thread (gh #227). ``pending`` is read before clearing,
+    # so the resume below still rides resume[] keyed by that interrupt.
+    pending = await _check_resume(agent, thread_id, resume)
     if isinstance(resume, dict) and isinstance(resume.get("decisions"), list):
         # One decision vocabulary (vscode #114 / #117, see langstage_core.resume): when
         # the thread is paused on a HumanInTheLoopMiddleware request (an
@@ -1324,15 +1408,12 @@ async def _resume_input_fields(agent, thread_id, resume) -> dict:
         # ``interrupt(...)``) gets the payload verbatim: that graph reads its own words.
         from ..resume import canonicalize_resume
 
-        pending = await _pending_interrupts(agent, thread_id)
         if pending and all(
             isinstance(getattr(p, "value", None), dict) and "action_requests" in p.value
             for p in pending
         ):
             resume = canonicalize_resume(resume)
     if _supports_agui_resume(agent):
-        if pending is None:
-            pending = await _pending_interrupts(agent, thread_id)
         interrupt_id = getattr(pending[0], "id", None) if len(pending) == 1 else None
         if interrupt_id:
             from ag_ui.core.types import ResumeEntry
