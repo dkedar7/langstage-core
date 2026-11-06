@@ -46,7 +46,9 @@ from .host import (
 from .resume import (
     DECISION_ALIASES,
     DECISION_VERBS,
+    InvalidDecisionError,
     create_resume_input,
+    decision_problems,
     is_allowed_decision,
     normalize_decision,
     prepare_agent_input,
@@ -87,6 +89,8 @@ __all__ = [
     "DECISION_ALIASES",
     "normalize_decision",
     "is_allowed_decision",
+    "decision_problems",
+    "InvalidDecisionError",
     # Extractors (ToolExtractor protocol + reusable built-ins)
     "ToolExtractor",
     "ThinkToolExtractor",

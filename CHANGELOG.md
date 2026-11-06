@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.58] - 2026-11-06
+
+### Fixed
+- **A refused HITL decision is checked before it's sent, and a thread stuck on one recovers
+  (gh #227).** A resume HumanInTheLoopMiddleware refuses (a type the tool doesn't allow, an
+  `edit` without `edited_action`, a `respond` without a `message`, the wrong number of
+  decisions) used to reach the graph: the middleware raised, LangGraph kept that answer on
+  the thread, and every later resume replayed it, so the approval could never be answered
+  again. That hit any API client of web, jupyter or vscode. `iter_event_frames`,
+  `iter_chunk_frames` and the served endpoint now check the answer against the pending
+  request first. A refused one ends the run with an `InvalidDecisionError` (an `error` frame,
+  or `RUN_ERROR` when served), and the thread stays paused on the same approval. A thread an
+  older version left stuck is cleared on the next resume, and that resume still rides
+  `RunAgentInput.resume[]`, so it logs no `forwardedProps.command.resume is deprecated`
+  warning.
+
+### Added
+- `decision_problems(resume, interrupt)` (top-level): the reasons an answer would be refused,
+  or `[]`, for a surface that wants to re-prompt before resuming. `InvalidDecisionError`
+  (a `ValueError`) is exported too.
+
 ## [1.0.57] - 2026-11-05
 
 ### Fixed
