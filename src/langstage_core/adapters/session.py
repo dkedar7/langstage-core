@@ -48,6 +48,7 @@ class Session:
         self.interrupt: dict[str, Any] | None = None
         # When ``outcome in {"error"}``, a human-readable error string.
         self.error: str | None = None
+        self.error_code: str | None = None
 
     def cancel_current(self) -> bool:
         """Cancel the in-flight turn if any. Returns True if one was cancelled."""
@@ -237,6 +238,7 @@ class SessionAdapter:
         session.outcome = None
         session.interrupt = None
         session.error = None
+        session.error_code = None
         pending_interrupt: dict[str, Any] | None = None
         try:
             # build_agent()/clone() run INSIDE the try: a graph build_agent can't wrap,
@@ -275,6 +277,7 @@ class SessionAdapter:
                 elif kind == "error":
                     session.outcome = _terminal_outcome(saw_interrupt=False, saw_error=True)
                     session.error = data.get("error")
+                    session.error_code = data.get("code")
                     return
                 elif kind == "complete":
                     session.outcome = _terminal_outcome(
