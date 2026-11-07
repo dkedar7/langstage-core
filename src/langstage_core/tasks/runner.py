@@ -27,6 +27,7 @@ import uuid
 from typing import Any, Optional
 
 from .._text import TextJoiner
+from ..resume import InvalidDecisionError, decision_problems
 from .state import (
     CANCELLED,
     DONE,
@@ -170,6 +171,12 @@ class TaskRunner:
         ``{"decisions": [...]}`` envelope the streaming ``resume=`` takes is accepted
         too; it used to be double-wrapped into a garbage decision (gh #166). Anything
         else raises ``TypeError``.
+
+        Decisions the pending HumanInTheLoopMiddleware request would refuse (a type
+        that action doesn't allow, an ``edit`` without ``edited_action``, the wrong
+        count) raise :class:`~langstage_core.resume.InvalidDecisionError` and leave
+        the task in ``review_needed`` with its interrupt, so the approval can be
+        answered again (gh #230). They used to fail the task and drop the interrupt.
         """
         if isinstance(decisions, dict) and isinstance(decisions.get("decisions"), list):
             decisions = decisions["decisions"]
@@ -181,8 +188,13 @@ class TaskRunner:
         task = await self._store.get(task_id)
         if task is None or task.get("state") != REVIEW_NEEDED:
             return False
+        problems = decision_problems({"decisions": decisions}, task.get("interrupt"))
+        if problems:
+            raise InvalidDecisionError(
+                "; ".join(problems) + ". Nothing was sent; answer the approval again."
+            )
         await self._store.update(
-            task_id, state=ONGOING, interrupt=None, started_at=now_iso()
+            task_id, state=ONGOING, interrupt=None, error=None, started_at=now_iso()
         )
         t = asyncio.create_task(self._resume_run(task, decisions))
         self._side_tasks.add(t)
@@ -281,9 +293,13 @@ class TaskRunner:
             session = self._adapter.submit_decisions(task["thread_id"], decisions)
         finally:
             current_task_id.reset(token)
-        await self._await_run(task_id, session)
+        # The graph refuses what the stored interrupt didn't catch (it can differ from
+        # the thread's, e.g. a store restored from elsewhere): put the approval back.
+        await self._await_run(task_id, session, refused_restores=task.get("interrupt"))
 
-    async def _await_run(self, task_id: str, session: Any) -> None:
+    async def _await_run(
+        self, task_id: str, session: Any, refused_restores: Any = None
+    ) -> None:
         """Stream the run's events to the store as they arrive, then record the
         terminal outcome. Streaming (vs draining at the end) is what makes the
         per-task detail/replay view possible — including live-tailing."""
@@ -316,6 +332,17 @@ class TaskRunner:
             logger.exception("task %s run raised", task_id)
 
         result_text = text.text().strip() or None
+        error = getattr(session, "error", None)
+        if (
+            refused_restores is not None
+            and getattr(session, "outcome", None) == "error"
+            and isinstance(error, str)
+            and error.startswith(f"{InvalidDecisionError.__name__}:")
+        ):
+            await self._store.update(
+                task_id, state=REVIEW_NEEDED, interrupt=refused_restores, error=error
+            )
+            return
         await self._record_outcome(task_id, session, result_text)
 
     async def _flush_remaining(self, task_id: str, q: Any) -> None:
