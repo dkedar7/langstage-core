@@ -990,6 +990,17 @@ class _TurnStream:
             return None
         try:
             state = await aget_state({"configurable": {"thread_id": self.thread_id}})
+            # A read of the latest state also applies the running step's pending writes,
+            # and that re-runs the messages reducer, which gives an id-less message
+            # (a node returning ``AIMessage("...")``) a fresh uuid on EVERY read. A flush
+            # that landed in that window synthesized the message under one id and the
+            # next flush, reading the committed checkpoint, under another, so the served
+            # wire streamed it twice (gh #229). Read the committed checkpoint instead:
+            # its ids are the ones MESSAGES_SNAPSHOT carries.
+            if any(getattr(t, "result", None) is not None for t in getattr(state, "tasks", ()) or ()):
+                conf = dict((getattr(state, "config", None) or {}).get("configurable") or {})
+                if conf.get("checkpoint_id"):
+                    state = await aget_state({"configurable": conf})
         except Exception:  # noqa: BLE001 - best-effort; never fatal to the turn
             return None
         values = getattr(state, "values", None)

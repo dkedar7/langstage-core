@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.59] - 2026-11-07
+
+### Fixed
+- **A refused HITL decision on a task keeps the approval answerable (gh #230).** Since #227 a
+  refused answer never reaches the graph, but `TaskRunner.resume()` flipped the task to
+  `ongoing` with no interrupt first, so the refused run recorded it as `failed`: the corrected
+  `resume()` the error asks for returned False, and only `retry()` (a new turn) was left.
+  `resume()` now checks the decisions against the task's stored interrupt with
+  `decision_problems` and raises `InvalidDecisionError` with the task left in
+  `review_needed`, its interrupt intact. If the graph refuses an answer the stored interrupt
+  couldn't check, the task goes back to `review_needed` with its interrupt and the reason in
+  `error`; a later resume clears it.
+- **The served wire no longer streams a finished message twice (gh #229).** Finished
+  messages are synthesized from checkpoint reads (gh #140). A read of the latest state also
+  applies the running step's pending writes, and that re-runs the messages reducer, so a
+  message a node returned without an id (`AIMessage("...")`) got a new uuid on every such
+  read. A flush that landed in that window emitted the message under one id and a later
+  flush emitted it again under the committed id, so clients saw it twice (the intermittent
+  `test_served_and_in_process_wires_agree` failure). The reads now use the committed
+  checkpoint whenever writes are pending, so every synthesized message carries the id the
+  closing `MESSAGES_SNAPSHOT` has.
+
 ## [1.0.58] - 2026-11-06
 
 ### Fixed
