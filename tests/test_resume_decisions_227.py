@@ -142,6 +142,44 @@ async def test_refused_decision_is_not_sent_and_the_approval_can_be_answered(col
     assert "Done." in done.text
 
 
+async def test_task_runner_keeps_refused_approval_for_corrected_answer():
+    import asyncio
+
+    from langstage_core import SessionAdapter
+    from langstage_core.tasks import DONE, FAILED, REVIEW_NEEDED, InMemoryTaskStore, TaskRunner
+
+    store = InMemoryTaskStore()
+    runner = TaskRunner(SessionAdapter(graph=_graph()), store, poll_interval=0.01)
+
+    async def wait_for(task_id, states):
+        async with asyncio.timeout(10):
+            while True:
+                row = await store.get(task_id)
+                if row["state"] in states:
+                    return row
+                await asyncio.sleep(0.01)
+
+    await runner.start()
+    try:
+        task_id = await runner.enqueue(title="email", prompt="email a")
+        first = await wait_for(task_id, {REVIEW_NEEDED, FAILED})
+        assert first["state"] == REVIEW_NEEDED
+        interrupt = first["interrupt"]
+        assert await runner.resume(task_id, [{"type": "reject"}])
+        refused = await wait_for(task_id, {REVIEW_NEEDED, FAILED})
+        assert refused["state"] == REVIEW_NEEDED
+        assert refused["interrupt"] == interrupt
+        assert "InvalidDecisionError" in refused["error"]
+        assert await runner.resume(task_id, [{"type": "approve"}])
+        done = await wait_for(task_id, {DONE, FAILED})
+        assert done["state"] == DONE, done["error"]
+        assert done["error"] is None
+        assert done["interrupt"] is None
+        assert "Done." in done["result"]
+    finally:
+        await runner.shutdown()
+
+
 async def test_a_thread_stuck_by_an_older_version_recovers(caplog):
     from langgraph.types import Command
 

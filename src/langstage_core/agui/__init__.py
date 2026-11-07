@@ -1669,6 +1669,18 @@ async def iter_event_frames(
         agent = agent.clone() if hasattr(agent, "clone") else agent
         # Built after the agent: the resume rides RunAgentInput.resume[] keyed by the
         # thread's pending interrupt id, read from the agent's checkpoint (gh #144).
+        from ..resume import InvalidDecisionError
+
+        try:
+            resume_fields = await _resume_input_fields(agent, thread_id, resume)
+        except InvalidDecisionError as exc:
+            yield {
+                "type": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "code": "invalid_decision",
+                **_debug_traceback_extra(),
+            }
+            return
         run_input = RunAgentInput(
             thread_id=thread_id,
             run_id=str(uuid.uuid4()),
@@ -1676,7 +1688,7 @@ async def iter_event_frames(
             messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
             tools=[],
             context=[],
-            **await _resume_input_fields(agent, thread_id, resume),
+            **resume_fields,
         )
         # _TurnStream surfaces finished (non-token-streamed) messages as real AG-UI
         # events at the step that produced them — in message order, before a later

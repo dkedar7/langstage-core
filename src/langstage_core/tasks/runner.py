@@ -182,7 +182,7 @@ class TaskRunner:
         if task is None or task.get("state") != REVIEW_NEEDED:
             return False
         await self._store.update(
-            task_id, state=ONGOING, interrupt=None, started_at=now_iso()
+            task_id, state=ONGOING, interrupt=None, error=None, started_at=now_iso()
         )
         t = asyncio.create_task(self._resume_run(task, decisions))
         self._side_tasks.add(t)
@@ -281,9 +281,12 @@ class TaskRunner:
             session = self._adapter.submit_decisions(task["thread_id"], decisions)
         finally:
             current_task_id.reset(token)
-        await self._await_run(task_id, session)
+        await self._await_run(task_id, session, resume_interrupt=task.get("interrupt"))
 
-    async def _await_run(self, task_id: str, session: Any) -> None:
+    async def _await_run(
+        self, task_id: str, session: Any, *,
+        resume_interrupt: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Stream the run's events to the store as they arrive, then record the
         terminal outcome. Streaming (vs draining at the end) is what makes the
         per-task detail/replay view possible — including live-tailing."""
@@ -316,7 +319,7 @@ class TaskRunner:
             logger.exception("task %s run raised", task_id)
 
         result_text = text.text().strip() or None
-        await self._record_outcome(task_id, session, result_text)
+        await self._record_outcome(task_id, session, result_text, resume_interrupt)
 
     async def _flush_remaining(self, task_id: str, q: Any) -> None:
         if q is None:
@@ -331,10 +334,23 @@ class TaskRunner:
             await self._store.append_events(task_id, leftover)
 
     async def _record_outcome(
-        self, task_id: str, session: Any, result_text: Optional[str]
+        self, task_id: str, session: Any, result_text: Optional[str],
+        resume_interrupt: Optional[dict[str, Any]] = None,
     ) -> None:
         outcome = getattr(session, "outcome", None)
         state = outcome_to_state(outcome)
+        if (
+            state == FAILED
+            and resume_interrupt is not None
+            and getattr(session, "error_code", None) == "invalid_decision"
+        ):
+            await self._store.update(
+                task_id,
+                state=REVIEW_NEEDED,
+                interrupt=resume_interrupt,
+                error=getattr(session, "error", None),
+            )
+            return
         fields: dict[str, Any] = {"state": state}
         if state in TERMINAL_STATES:
             fields["finished_at"] = now_iso()
