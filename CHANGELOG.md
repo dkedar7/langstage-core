@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.60] - 2026-11-08
+
+### Fixed
+- **A task's event log records the human's later turns (gh #233).** `TaskRunner.followup()`
+  and `resume()` started a run on the task's thread without recording what the human said,
+  so a replay of `get_events` (the web Board's task view) showed agent replies with no
+  visible prompt. Each accepted turn is now appended before the run's own frames: a
+  follow-up as `{"type": "user", "role": "user", "content": "..."}` and a HITL answer as
+  `{"type": "resume", "decisions": [...]}` (the `{"decisions": [...]}` envelope is recorded
+  unwrapped). A refused or rejected turn records nothing. The task's first turn stays in
+  `task["prompt"]`. Consumers that switch on `type` and ignore unknown frames are
+  unaffected.
+
 ## [1.0.59] - 2026-11-07
 
 ### Fixed

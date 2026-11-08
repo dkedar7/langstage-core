@@ -177,6 +177,9 @@ class TaskRunner:
         count) raise :class:`~langstage_core.resume.InvalidDecisionError` and leave
         the task in ``review_needed`` with its interrupt, so the approval can be
         answered again (gh #230). They used to fail the task and drop the interrupt.
+
+        An accepted answer is appended to the task's event log as
+        ``{"type": "resume", "decisions": [...]}`` before the run's own frames (gh #233).
         """
         if isinstance(decisions, dict) and isinstance(decisions.get("decisions"), list):
             decisions = decisions["decisions"]
@@ -196,6 +199,9 @@ class TaskRunner:
         await self._store.update(
             task_id, state=ONGOING, interrupt=None, error=None, started_at=now_iso()
         )
+        # Record the human's answer in the transcript before the run's frames, so a
+        # replay shows what was decided, not only the agent's reply (gh #233).
+        await self._store.append_events(task_id, [{"type": "resume", "decisions": decisions}])
         t = asyncio.create_task(self._resume_run(task, decisions))
         self._side_tasks.add(t)
         t.add_done_callback(self._side_tasks.discard)
@@ -208,6 +214,10 @@ class TaskRunner:
         history), runs in the background, and flips the task to ``ongoing`` →
         ``done`` with the new reply. For a ``review_needed`` task use
         :meth:`resume` instead. Non-blocking.
+
+        The message is appended to the task's event log as
+        ``{"type": "user", "role": "user", "content": ...}`` before the reply's frames
+        (gh #233); the task's first turn stays in ``task["prompt"]``.
         """
         if not message or not message.strip():
             return False
@@ -216,6 +226,11 @@ class TaskRunner:
             return False
         await self._store.update(
             task_id, state=ONGOING, finished_at=None, error=None, started_at=now_iso()
+        )
+        # The follow-up is a user turn: record it ahead of the reply it prompts, so a
+        # replay of the transcript shows who said what (gh #233).
+        await self._store.append_events(
+            task_id, [{"type": "user", "role": "user", "content": message.strip()}]
         )
         t = asyncio.create_task(self._followup_run(task, message.strip()))
         self._side_tasks.add(t)
