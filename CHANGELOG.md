@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.61] - 2026-11-10
+
+### Fixed
+- **`langstage-agui -m` / `--json` / `--verify`: an agent's prints during the turn no longer
+  corrupt stdout (gh #235).** The stdout guard covered import time only, so a node, tool,
+  chatty SDK or `verbose=True` chain that printed while the turn ran wrote ahead of the
+  reply, made `--json` unparseable, and still exited 0. The agent is now built and run with
+  its stdout sent to stderr. stdout carries only the reply, the JSON document or the
+  verdict. Diverted text is escaped like `safe_write`, so an agent printing a character the
+  console can't encode (cp1252) no longer kills the turn.
+
+### Added
+- **`langstage_core.console.agent_stdout_to_stderr()`.** A context manager that runs an
+  agent turn with its prints sent to stderr and yields the real stdout for the result, so
+  leaf surfaces can share the guard instead of each writing their own.
+
 ## [1.0.60] - 2026-11-08
 
 ### Fixed
