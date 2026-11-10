@@ -41,7 +41,19 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
     human path; ``--json`` prints the typed ``TurnResult`` for scripting. Exit code
     mirrors the turn outcome via :func:`_exit_code_for`. ``config`` is forwarded to
     ``build_agent`` (the ``langstage.toml`` ``[configurable]`` table, gh #170).
+
+    stdout carries only the reply or the JSON document: anything the agent prints
+    while it is built or runs the turn goes to stderr (gh #235). The import-time guard
+    (``load_agent_spec(stdout_to_stderr=True)``) never covered the turn itself.
     """
+    from ..console import agent_stdout_to_stderr
+
+    with agent_stdout_to_stderr() as out:
+        return _run_message_to(graph, message, as_json=as_json, config=config, out=out)
+
+
+def _run_message_to(graph: Any, message: str, *, as_json: bool, config: Any, out: Any) -> int:
+    """:func:`_run_message`'s body; the reply goes to ``out`` (the real stdout)."""
     import asyncio
 
     from .._text import TextJoiner
@@ -73,7 +85,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
                 "interrupt": None,
                 "error": detail,
                 "traceback": tb,
-            }))
+            }), file=out)
         else:
             safe_print(f"error: agent did not complete a turn: {detail}", file=sys.stderr)
             if tb:
@@ -92,7 +104,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
         import json
 
         result = asyncio.run(collect_chunk_frames(agent, message, thread_id))
-        print(json.dumps({
+        safe_print(json.dumps({
             "text": result.text,
             "outcome": result.outcome,
             "tool_calls": result.tool_calls,
@@ -101,7 +113,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
             "interrupt": result.interrupt,
             "error": result.error,
             "traceback": result.traceback,  # non-null on error under LANGSTAGE_DEBUG (gh #132)
-        }))
+        }), file=out)
         return _exit_code_for(result.outcome)
 
     outcome = "complete"
@@ -116,7 +128,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
                 # Model text is arbitrary Unicode: escape what the console can't
                 # encode instead of crashing mid-reply on cp1252 (gh #153).
                 safe_write(text.add(chunk["chunk"] or "", node=chunk.get("node"),
-                                    message_id=chunk.get("message_id")), flush=True)
+                                    message_id=chunk.get("message_id")), out, flush=True)
                 wrote_text = True
             elif status == "interrupt":
                 outcome = "interrupted"
@@ -132,7 +144,7 @@ def _run_message(graph: Any, message: str, *, as_json: bool, config: Any = None)
                 if tb:
                     sys.stderr.write(tb if tb.endswith("\n") else tb + "\n")
         if wrote_text:
-            sys.stdout.write("\n")
+            out.write("\n")
 
     asyncio.run(_stream())
     return _exit_code_for(outcome)
@@ -365,7 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify:
         from . import verify
 
-        result = verify(graph)
+        from ..console import agent_stdout_to_stderr
+
+        # The verdict owns stdout; the agent's turn-time prints go to stderr (gh #235).
+        with agent_stdout_to_stderr():
+            result = verify(graph)
         if result.ok:
             print(f"ok: {result.reason} ({result.frames} frames, {result.content_chars} chars)")
             return 0

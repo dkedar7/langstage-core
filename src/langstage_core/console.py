@@ -26,10 +26,12 @@ stdout (click's own echo raises on an unencodable char just like ``print``).
 """
 from __future__ import annotations
 
+import contextlib
 import sys
+from collections.abc import Iterator
 from typing import IO, Any
 
-__all__ = ["safe_print", "safe_write", "console_safe"]
+__all__ = ["safe_print", "safe_write", "console_safe", "agent_stdout_to_stderr"]
 
 
 def console_safe(text: str, stream: IO[str] | None = None) -> str:
@@ -80,3 +82,50 @@ def safe_print(
     only characters the target stream can't encode are ``backslashreplace``-escaped.
     """
     safe_write(sep.join(str(v) for v in values) + end, file, flush=flush)
+
+
+class _SafeStderr:
+    """A text stream that forwards writes to ``target`` (stderr), escaping what it
+    can't encode (gh #235). Anything else (``fileno``, ``isatty``, ``encoding``,
+    ``buffer``...) is delegated, so a library that pokes at ``sys.stdout`` still works.
+    """
+
+    def __init__(self, target: IO[str]) -> None:
+        self._target = target
+
+    def write(self, text: str) -> int:
+        self._target.write(console_safe(text, self._target))
+        return len(text)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+@contextlib.contextmanager
+def agent_stdout_to_stderr() -> Iterator[IO[str]]:
+    """Run an agent turn with its prints sent to stderr; yield the real stdout.
+
+    A machine-readable one-shot path (``langstage-agui -m`` / ``--json`` /
+    ``--verify``) owns stdout: it carries only the reply, the JSON document or the
+    verdict. ``load_agent_spec(stdout_to_stderr=True)`` already keeps import-time
+    prints off it; this covers the turn itself, where a node, a tool, a chatty SDK or
+    a ``verbose=True`` chain prints (gh #235). Write the result to the yielded stream::
+
+        with agent_stdout_to_stderr() as out:
+            result = run_the_turn()
+            safe_print(json.dumps(result), file=out)
+
+    The diverted text is escaped like :func:`safe_write`, so an agent printing a
+    character stderr can't encode no longer kills the turn on cp1252.
+    ``sys.stdout`` is restored on exit; nothing is reconfigured.
+    """
+    real = sys.stdout
+    with contextlib.redirect_stdout(_SafeStderr(sys.stderr)):  # type: ignore[arg-type]
+        yield real
