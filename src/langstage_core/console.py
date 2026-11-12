@@ -31,7 +31,46 @@ import sys
 from collections.abc import Iterator
 from typing import IO, Any
 
-__all__ = ["safe_print", "safe_write", "console_safe", "agent_stdout_to_stderr"]
+__all__ = [
+    "safe_print",
+    "safe_write",
+    "console_safe",
+    "agent_stdout_to_stderr",
+    "is_closed_pipe",
+    "quiet_closed_stdout",
+]
+
+
+def is_closed_pipe(exc: BaseException) -> bool:
+    """True when ``exc`` means the reader of a pipe went away (gh #238).
+
+    POSIX raises ``BrokenPipeError``; Windows raises ``OSError`` with ``EINVAL`` for a
+    write to a pipe whose reader closed (the langstage-vscode #163 finding).
+    """
+    import errno
+
+    if isinstance(exc, BrokenPipeError):
+        return True
+    return sys.platform == "win32" and isinstance(exc, OSError) and exc.errno == errno.EINVAL
+
+
+def quiet_closed_stdout(stream: IO[str] | None = None) -> None:
+    """Point ``stream``'s file descriptor (default stdout) at the null device (gh #238).
+
+    Call it after catching a closed-pipe error at a CLI entry point, so the
+    interpreter's shutdown flush doesn't raise a second ``BrokenPipeError`` (and print
+    ``Exception ignored ... BrokenPipeError``). A stream without a real descriptor
+    (test capture) is left alone.
+    """
+    import os
+
+    stream = sys.stdout if stream is None else stream
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stream.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def console_safe(text: str, stream: IO[str] | None = None) -> str:
@@ -64,9 +103,16 @@ def safe_write(text: str, file: IO[str] | None = None, *, flush: bool = False) -
     stream = sys.stdout if file is None else file
     if stream is None:  # pythonw / a detached process has no stdout
         return
-    stream.write(console_safe(text, stream))
-    if flush:
-        stream.flush()
+    try:
+        stream.write(console_safe(text, stream))
+        if flush:
+            stream.flush()
+    except OSError as exc:
+        # The reader closed the pipe (``| head``). Report it as BrokenPipeError on every
+        # OS (Windows says EINVAL), so a CLI entry point can end quietly (gh #238).
+        if is_closed_pipe(exc) and not isinstance(exc, BrokenPipeError):
+            raise BrokenPipeError(32, "the reader closed the output pipe") from exc
+        raise
 
 
 def safe_print(
