@@ -856,6 +856,82 @@ def _install_run_failure_capture() -> None:
         logger.addFilter(_CaptureRunFailure())
 
 
+CANCELLED_TOOL_RESULT = "Cancelled by user: the turn was stopped before this tool returned a result."
+
+
+def _is_resume_run(run_input) -> bool:
+    """True when ``run_input`` answers an interrupt rather than starting a new turn."""
+    if getattr(run_input, "resume", None):
+        return True
+    props = getattr(run_input, "forwarded_props", None)
+    return isinstance(props, dict) and isinstance(props.get("command"), dict) and "resume" in props["command"]
+
+
+async def _answer_cancelled_tool_calls(agent, thread_id) -> list:
+    """Close tool calls a cancelled turn left unanswered, before the next turn (gh #237).
+
+    Stopping a turn while a tool runs leaves the model's ``AIMessage`` (with
+    ``tool_calls``) committed but no ``ToolMessage`` for it, so the next turn sends the
+    model a tool call with no result, which providers reject. Before a NEW turn (never a
+    resume), when the thread's latest ``AIMessage`` is followed only by tool results and
+    some of its calls have none, this appends one ``ToolMessage`` per unanswered call
+    (``status="error"``, :data:`CANCELLED_TOOL_RESULT`), so the history says the call was
+    cancelled and the next model call is well-formed. Returns the ids it answered.
+
+    Conservative by design, and best-effort (any failure leaves the thread untouched):
+
+    - a thread paused on an interrupt is left alone: its unanswered calls are awaiting a
+      human decision, not cancelled;
+    - only a ``messages`` channel using LangGraph's ``add_messages`` reducer is written
+      (``MessagesState``, ``create_agent``, deepagents), so the update appends;
+    - idempotent: once every call has a result there is nothing to do. An agent that runs
+      deepagents' ``PatchToolCallsMiddleware`` then finds no dangling call either, so no
+      call is answered twice.
+    """
+    graph = getattr(agent, "graph", None)
+    aget_state = getattr(graph, "aget_state", None)
+    aupdate_state = getattr(graph, "aupdate_state", None)
+    if aget_state is None or aupdate_state is None or thread_id is None:
+        return []
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        state = await aget_state(config)
+        if any(getattr(t, "interrupts", None) for t in getattr(state, "tasks", None) or ()):
+            return []
+        values = getattr(state, "values", None)
+        msgs = values.get("messages") if isinstance(values, dict) else None
+        if not isinstance(msgs, (list, tuple)) or not msgs:
+            return []
+        channel = (getattr(graph, "channels", None) or {}).get("messages")
+        op = getattr(channel, "operator", None)
+        if "add_messages" not in getattr(op, "__name__", ""):
+            return []
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        idx = next((i for i in range(len(msgs) - 1, -1, -1) if isinstance(msgs[i], AIMessage)), None)
+        if idx is None or not all(isinstance(m, ToolMessage) for m in msgs[idx + 1:]):
+            return []
+        answered = {m.tool_call_id for m in msgs[idx + 1:]}
+        missing = [tc for tc in msgs[idx].tool_calls or () if tc.get("id") and tc["id"] not in answered]
+        if not missing:
+            return []
+        update = {"messages": [
+            ToolMessage(content=CANCELLED_TOOL_RESULT, tool_call_id=tc["id"],
+                        name=tc.get("name"), status="error")
+            for tc in missing
+        ]}
+        try:
+            await aupdate_state(config, update)
+        except Exception:  # noqa: BLE001
+            # LangGraph can't tell which node to attribute the write to (e.g. parallel
+            # tool tasks, one committed): write it as an input update instead. The new
+            # turn starts from START either way.
+            await aupdate_state(config, update, as_node="__start__")
+        return [tc["id"] for tc in missing]
+    except Exception:  # noqa: BLE001 - best-effort; never fatal to the turn
+        return []
+
+
 class _TurnStream:
     """Drive ``agent.run(run_input)`` and surface **finished** messages as real AG-UI
     events at the step that produced them: the one place both ``iter_*`` wires and the
@@ -1081,6 +1157,9 @@ class _TurnStream:
                     tool_call_id=tcid, content=str(item["raw"]), role="tool")
 
     async def events(self):
+        if not _is_resume_run(self.run_input):
+            # A turn stopped mid-tool left calls without results (gh #237).
+            await _answer_cancelled_tool_calls(self.agent, self.thread_id)
         base = await self._checkpoint_messages()
         if base is not None:
             self._pre_ids = {str(m.id) for m in base if getattr(m, "id", None) is not None}

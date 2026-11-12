@@ -144,13 +144,32 @@ def _run_message_to(graph: Any, message: str, *, as_json: bool, config: Any, out
                 if tb:
                     sys.stderr.write(tb if tb.endswith("\n") else tb + "\n")
         if wrote_text:
-            out.write("\n")
+            safe_write("\n", out)  # a closed pipe surfaces the same on every OS (gh #238)
 
     asyncio.run(_stream())
     return _exit_code_for(outcome)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point for ``langstage-agui``.
+
+    A reader that stops early (``langstage-agui -m ... | head -1``) closes stdout
+    mid-reply. That's normal pipeline use, not a failed turn: end quietly with exit 0,
+    no traceback, as langstage-vscode (#163) and langstage-cli (#74) do. Exit 1 is
+    reserved for a turn that errored (ADR 0007). (gh #238)
+    """
+    from ..console import is_closed_pipe, quiet_closed_stdout
+
+    try:
+        return _main(argv)
+    except OSError as exc:
+        if not is_closed_pipe(exc):
+            raise
+        quiet_closed_stdout()
+        return EXIT_OK
+
+
+def _main(argv: list[str] | None = None) -> int:
     # Usage errors exit 64, not argparse's 2 (which the family reserves for "paused on
     # a HITL interrupt"). Exit codes: 0 ok / 1 failed / 2 paused / 64 usage (ADR 0007).
     parser = ArgumentParser(

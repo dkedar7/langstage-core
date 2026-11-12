@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.62] - 2026-11-12
+
+### Fixed
+- **A turn stopped mid-tool no longer breaks the next turn (gh #237).** Cancelling while a
+  tool ran left the model's tool call in the thread with no result, so the next message
+  sent the model a call with no answer, which providers reject. Before a new turn (never a
+  resume), the shared run path behind `iter_chunk_frames`, `iter_event_frames`, the
+  `SessionAdapter` and the served endpoint now answers each such call with a
+  `ToolMessage` (`status="error"`, "Cancelled by user: the turn was stopped before this
+  tool returned a result."). The history then shows the call as cancelled, and the
+  synthetic result is not re-sent as part of the new turn. The repair is idempotent, only
+  writes a `messages` channel that uses `add_messages`, and leaves a thread paused on an
+  interrupt alone (those calls are awaiting a decision). An agent running deepagents'
+  `PatchToolCallsMiddleware` then finds nothing left to patch, so no call is answered
+  twice. Every stage gets this by upgrading core.
+- **`langstage-agui -m` / `--json` ends quietly when the reader closes stdout (gh #238).**
+  `langstage-agui -m ... | head -1` crashed with a `BrokenPipeError` traceback and exit 1,
+  which ADR 0007 reserves for a failed turn. A closed stdout now ends the run with exit 0
+  and no traceback, on POSIX (`BrokenPipeError`) and Windows (`OSError` `EINVAL`), as
+  langstage-vscode (#163) and langstage-cli (#74) already do.
+
+### Added
+- **`langstage_core.console.is_closed_pipe()` and `quiet_closed_stdout()`.**
+  `safe_write` / `safe_print` now raise `BrokenPipeError` for a closed pipe on every OS, so a
+  surface's entry point can catch one exception and end quietly.
+
 ## [1.0.61] - 2026-11-10
 
 ### Fixed
