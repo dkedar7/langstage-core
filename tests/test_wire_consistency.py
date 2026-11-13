@@ -430,3 +430,106 @@ def test_stdlib_typeddict_state_serves():
     events = _served_events(_stdlib_typeddict_graph())
     assert not any(e["type"] == "RUN_ERROR" for e in events)
     assert "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT") == "echo: hi"
+
+
+# ── subgraph nodes keep the finished-message guarantees (gh #240) ────
+
+
+@tool
+def add(a: int, b: int) -> int:
+    """Add two integers."""
+    return a + b
+
+
+@tool
+def add_down(a: int, b: int) -> int:
+    """Add two integers (the database is down)."""
+    raise RuntimeError("db down")
+
+
+def _subgraph_graph(fail=False, interrupt_first=False):
+    """The supervisor shape: a compiled agent added as a node of an outer graph."""
+    from langgraph.types import interrupt
+
+    tool_ = add_down if fail else add
+
+    def agent(state):
+        if isinstance(state["messages"][-1], ToolMessage):
+            return {"messages": [AIMessage(content="The answer is 42.")]}
+        return {"messages": [AIMessage(
+            content="Let me add those.",
+            tool_calls=[{"name": tool_.name, "args": {"a": 17, "b": 25}, "id": "c1"}])]}
+
+    def gate(state):
+        interrupt({"question": "go?"})
+        return {}
+
+    inner = StateGraph(MessagesState)
+    inner.add_node("agent", agent)
+    inner.add_node("tools", ToolNode([tool_], handle_tool_errors=not fail))
+    if interrupt_first:
+        inner.add_node("gate", gate)
+        inner.add_edge("agent", "gate")
+        inner.add_conditional_edges(
+            "gate", lambda s: "tools" if s["messages"][-1].tool_calls else END, ["tools", END])
+    else:
+        inner.add_conditional_edges(
+            "agent", lambda s: "tools" if s["messages"][-1].tool_calls else END, ["tools", END])
+    inner.add_edge(START, "agent")
+    inner.add_edge("tools", "agent")
+    outer = StateGraph(MessagesState)
+    outer.add_node("worker", inner.compile())
+    outer.add_edge(START, "worker")
+    outer.add_edge("worker", END)
+    return outer.compile()
+
+
+async def test_subgraph_text_precedes_its_own_tool_call():
+    ev = await _collect(iter_event_frames(_subgraph_graph(), "17+25?", "sg1"))
+    assert [f["type"] for f in ev] == ["content", "tool_start", "tool_end", "content", "complete"]
+    assert ev[0]["content"] == "Let me add those."
+    assert ev[3]["content"] == "The answer is 42."
+    ch = await _collect(iter_chunk_frames(_subgraph_graph(), "17+25?", "sg2"))
+    kinds = [next(k for k in ("chunk", "tool_calls", "tool_result") if k in f)
+             for f in ch if f["status"] == "streaming"]
+    assert kinds == ["chunk", "tool_calls", "tool_result", "chunk"]
+    assert ch[0]["chunk"] == "Let me add those."
+
+
+def test_served_subgraph_text_precedes_its_own_tool_call():
+    events = _served_events(_subgraph_graph(), "17+25?")
+    seq = [(e["type"], e.get("delta") or e.get("toolCallName"))
+           for e in events if e["type"] in ("TEXT_MESSAGE_CONTENT", "TOOL_CALL_START",
+                                            "TOOL_CALL_RESULT")]
+    assert seq == [("TEXT_MESSAGE_CONTENT", "Let me add those."), ("TOOL_CALL_START", "add"),
+                   ("TOOL_CALL_RESULT", None), ("TEXT_MESSAGE_CONTENT", "The answer is 42.")]
+
+
+async def test_subgraph_content_survives_an_error_inside_it():
+    ev = await _collect(iter_event_frames(_subgraph_graph(fail=True), "17+25?", "se1"))
+    assert [f["type"] for f in ev] == ["content", "tool_start", "error"]
+    assert ev[0]["content"] == "Let me add those."
+    ch = await _collect(iter_chunk_frames(_subgraph_graph(fail=True), "17+25?", "se2"))
+    assert [f["status"] for f in ch] == ["streaming", "streaming", "error"]
+    assert ch[0]["chunk"] == "Let me add those."
+    assert ch[1]["tool_calls"][0]["name"] == "add_down"
+    result = await collect_event_frames(_subgraph_graph(fail=True), "17+25?", "se3")
+    assert result.outcome == "error"
+    assert result.text == "Let me add those."
+    assert [c["name"] for c in result.tool_calls] == ["add_down"]
+
+
+def test_served_subgraph_content_survives_an_error_inside_it():
+    events = _served_events(_subgraph_graph(fail=True), "17+25?")
+    types = [e["type"] for e in events if e["type"] in (
+        "TEXT_MESSAGE_CONTENT", "TOOL_CALL_START", "RUN_ERROR")]
+    assert types == ["TEXT_MESSAGE_CONTENT", "TOOL_CALL_START", "RUN_ERROR"]
+
+
+async def test_subgraph_resume_does_not_replay_pre_interrupt_messages():
+    agent = build_agent(_subgraph_graph(interrupt_first=True))
+    first = await _collect(iter_event_frames(agent, "17+25?", "si1"))
+    assert [f["content"] for f in first if f["type"] == "content"] == ["Let me add those."]
+    resumed = await _collect(iter_event_frames(agent, "", "si1", resume="yes"))
+    assert [f["content"] for f in resumed if f["type"] == "content"] == ["The answer is 42."]
+    assert [f["type"] for f in resumed if f["type"] == "tool_start"] == ["tool_start"]
