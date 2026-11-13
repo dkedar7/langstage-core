@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.63] - 2026-11-13
+
+### Fixed
+- **A subgraph node keeps the finished-message guarantees (gh #240).** When an agent ran
+  as a compiled subgraph added with `outer.add_node("worker", inner_graph)` (the usual
+  supervisor / multi-agent shape), its finished messages were held back until the whole
+  subgraph node returned. A preamble like "Let me add those." then arrived after the tool
+  had already run. If a tool inside the subgraph raised, the turn yielded only the `error`
+  frame, and `TurnResult.text` / `tool_calls` came back empty. The per-step checkpoint
+  read behind `iter_event_frames`, `iter_chunk_frames` and the served endpoint now also
+  reads the running subgraphs' own checkpoints. A subgraph agent produces the same frames
+  as the same agent at top level: text before its own tool calls, and on an error the
+  content and tool calls it already produced come before `error`. A turn resumed from an
+  interrupt inside a subgraph doesn't replay what the subgraph said before it paused.
+  Token-streaming models were not affected. Every stage gets this by upgrading core.
+
 ## [1.0.62] - 2026-11-12
 
 ### Fixed

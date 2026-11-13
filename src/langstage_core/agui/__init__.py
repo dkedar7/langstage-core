@@ -1065,18 +1065,8 @@ class _TurnStream:
         if aget_state is None or self.thread_id is None:
             return None
         try:
-            state = await aget_state({"configurable": {"thread_id": self.thread_id}})
-            # A read of the latest state also applies the running step's pending writes,
-            # and that re-runs the messages reducer, which gives an id-less message
-            # (a node returning ``AIMessage("...")``) a fresh uuid on EVERY read. A flush
-            # that landed in that window synthesized the message under one id and the
-            # next flush, reading the committed checkpoint, under another, so the served
-            # wire streamed it twice (gh #229). Read the committed checkpoint instead:
-            # its ids are the ones MESSAGES_SNAPSHOT carries.
-            if any(getattr(t, "result", None) is not None for t in getattr(state, "tasks", ()) or ()):
-                conf = dict((getattr(state, "config", None) or {}).get("configurable") or {})
-                if conf.get("checkpoint_id"):
-                    state = await aget_state({"configurable": conf})
+            state = await self._read_state(
+                aget_state, {"configurable": {"thread_id": self.thread_id}})
         except Exception:  # noqa: BLE001 - best-effort; never fatal to the turn
             return None
         values = getattr(state, "values", None)
@@ -1085,7 +1075,73 @@ class _TurnStream:
         if not isinstance(values, dict):
             return None
         msgs = values.get("messages") or []
-        return list(msgs) if isinstance(msgs, (list, tuple)) else None
+        if not isinstance(msgs, (list, tuple)):
+            return None
+        out = list(msgs)
+        # A compiled graph added as a node (a supervisor / multi-agent shape) keeps its
+        # intermediate writes under its own checkpoint namespace: the parent's state sees
+        # them only when the whole subgraph node returns, and never if it raises. So a
+        # finished message inside it surfaced after its own tool calls, and an error
+        # inside it dropped everything it had said and done (gh #240). Append the
+        # running subgraphs' messages (by id; the parent later carries the same ids).
+        try:
+            seen = {str(m.id) for m in out if getattr(m, "id", None) is not None}
+            for sub in await self._subgraph_states(aget_state, state):
+                sub_values = getattr(sub, "values", None)
+                sub_msgs = sub_values.get("messages") if isinstance(sub_values, dict) else None
+                if not isinstance(sub_msgs, (list, tuple)):
+                    continue
+                for m in sub_msgs:
+                    mid = getattr(m, "id", None)
+                    if mid is None or str(mid) in seen:
+                        continue
+                    seen.add(str(mid))
+                    out.append(m)
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        return out
+
+    @staticmethod
+    async def _read_state(aget_state, config, *, subgraphs: bool = False):
+        state = await aget_state(config, subgraphs=subgraphs) if subgraphs else await aget_state(config)
+        # A read of the latest state also applies the running step's pending writes,
+        # and that re-runs the messages reducer, which gives an id-less message
+        # (a node returning ``AIMessage("...")``) a fresh uuid on EVERY read. A flush
+        # that landed in that window synthesized the message under one id and the
+        # next flush, reading the committed checkpoint, under another, so the served
+        # wire streamed it twice (gh #229). Read the committed checkpoint instead:
+        # its ids are the ones MESSAGES_SNAPSHOT carries.
+        if any(getattr(t, "result", None) is not None for t in getattr(state, "tasks", ()) or ()):
+            conf = dict((getattr(state, "config", None) or {}).get("configurable") or {})
+            if conf.get("checkpoint_id"):
+                state = (await aget_state({"configurable": conf}, subgraphs=subgraphs)
+                         if subgraphs else await aget_state({"configurable": conf}))
+        return state
+
+    async def _subgraph_states(self, aget_state, state, depth: int = 0) -> list:
+        """The committed states of subgraphs running under ``state``'s pending tasks,
+        outermost first (gh #240). Only a task whose ``state`` is a config (a subgraph
+        checkpoint namespace) is read; a plain node has none."""
+        if depth > 8:
+            return []
+        out: list = []
+        for task in getattr(state, "tasks", ()) or ():
+            sub = getattr(task, "state", None)
+            conf = (sub or {}).get("configurable") if isinstance(sub, dict) else None
+            if not conf and sub is not None and not isinstance(sub, dict):
+                conf = ((getattr(sub, "config", None) or {}).get("configurable") or None)
+            if not conf or not conf.get("checkpoint_ns"):
+                continue
+            try:
+                sub_state = await self._read_state(
+                    aget_state, {"configurable": {
+                        "thread_id": conf.get("thread_id", self.thread_id),
+                        "checkpoint_ns": conf["checkpoint_ns"]}})
+            except Exception:  # noqa: BLE001 - best-effort
+                continue
+            out.append(sub_state)
+            out.extend(await self._subgraph_states(aget_state, sub_state, depth + 1))
+        return out
 
     async def _flush(self):
         if self._pre_ids is None:
