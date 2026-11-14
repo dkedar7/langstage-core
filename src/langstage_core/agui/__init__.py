@@ -988,6 +988,9 @@ class _TurnStream:
         # not whichever step is current when the late read finally sees it.
         self._node_by_message: dict[str, str] = {}
         self._node_by_call: dict[str, str] = {}
+        # Every message id one model call streamed its chunks under, by the call's run
+        # id (gh #242). One call is one message, but its chunks need not share an id.
+        self._chunk_ids_by_run: dict[str, set] = {}
 
     def this_turn(self, messages) -> list:
         """``messages`` minus those already in the checkpoint before this run.
@@ -1047,7 +1050,9 @@ class _TurnStream:
         meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         node = meta.get("langgraph_node")
-        if kind == "on_chain_end" and node and raw.get("name") == node:
+        if kind in ("on_chat_model_stream", "on_chat_model_end"):
+            self._note_model_ids(raw.get("run_id"), data.get("chunk"), data.get("output"))
+        elif kind == "on_chain_end" and node and raw.get("name") == node:
             self._note_update(node, data.get("output"))
         elif kind == "on_chain_stream" and not node:
             chunk = data.get("chunk")
@@ -1058,6 +1063,33 @@ class _TurnStream:
                 for name, update in chunk.items():
                     if isinstance(update, dict):
                         self._note_update(name, update)
+
+    def _note_model_ids(self, run_id, *messages) -> None:
+        """Record the id of a model call's chunk (or its finished message) under the
+        call's ``run_id`` (gh #242)."""
+        if run_id is None:
+            return
+        for m in messages:
+            mid = m.get("id") if isinstance(m, dict) else getattr(m, "id", None)
+            if isinstance(mid, str) and mid:
+                self._chunk_ids_by_run.setdefault(str(run_id), set()).add(mid)
+
+    def _sync_streamed_aliases(self) -> None:
+        """Count a message as streamed under EVERY id its model call used.
+
+        A streamed message is recognised in the checkpoint by its id. That holds when
+        all of a call's chunks carry one id (Chat Completions: ``chatcmpl-…``). On the
+        OpenAI Responses API only the first, empty chunk carries the provider's id
+        (``resp_…``); the text chunks carry LangChain's run id (``lc_run--…``), which is
+        the id ag-ui-langgraph opens the text message under, while the finished message
+        in the checkpoint takes the provider's id. The two never matched, so the
+        streamed message was taken for a finished one and sent a second time in full,
+        after its own tool call (gh #242). Ids that came from one model call name one
+        message: once text streamed under any of them, all of them are streamed.
+        """
+        for ids in self._chunk_ids_by_run.values():
+            if len(ids) > 1 and not ids.isdisjoint(self.text_ids):
+                self.text_ids |= ids
 
     async def _checkpoint_messages(self):
         graph = getattr(self.agent, "graph", None)
@@ -1144,6 +1176,7 @@ class _TurnStream:
         return out
 
     async def _flush(self):
+        self._sync_streamed_aliases()
         if self._pre_ids is None:
             return
         msgs = await self._checkpoint_messages()
@@ -1943,7 +1976,9 @@ async def iter_event_frames(
                     # Only this run's messages: a resumed turn already sent what it
                     # said before the pause.
                     stream.this_turn(ev.messages),
-                    streamed_ids=streamed_ids,
+                    # | stream.text_ids: the other ids a streamed message's model
+                    # call used, which the snapshot may carry instead (gh #242).
+                    streamed_ids=streamed_ids | stream.text_ids,
                     tool_names=tool_names,
                     streamed_result_ids=streamed_result_ids,
                     step_nodes=step_nodes,
@@ -2211,7 +2246,9 @@ async def iter_chunk_frames(
                     # Only this run's messages: a resumed turn already sent what it
                     # said before the pause.
                     stream.this_turn(ev.messages),
-                    streamed_ids=streamed_ids,
+                    # | stream.text_ids: the other ids a streamed message's model
+                    # call used, which the snapshot may carry instead (gh #242).
+                    streamed_ids=streamed_ids | stream.text_ids,
                     tool_names=tool_names,
                     streamed_result_ids=streamed_result_ids,
                     step_nodes=step_nodes,

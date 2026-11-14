@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.64] - 2026-11-14
+
+### Fixed
+- **A streamed message is sent once on the OpenAI Responses API (gh #242).** With
+  `ChatOpenAI(..., use_responses_api=True)` every assistant message's text arrived twice:
+  token by token, then again in full when the step finished, so a message that narrates
+  and then calls a tool repeated its text after its own tool call, and `TurnResult.text`
+  held the text twice. A streamed message was matched to the finished one in the
+  checkpoint by id. On that API only a model call's first, empty chunk carries the
+  provider's id (`resp_…`); the text chunks carry LangChain's run id (`lc_run--…`), the id
+  the text message is opened under, while the checkpoint message takes the provider's id.
+  They never matched, so the streamed message was taken for a finished one and sent
+  again. The shared run path behind `iter_event_frames`, `iter_chunk_frames` and the
+  served endpoint now records every id a model call streams under and counts the message
+  as streamed under all of them. This covers any provider whose chunks for one call don't
+  share an id, at top level and inside a subgraph node. Chat Completions models were not
+  affected. Every stage gets this by upgrading core.
+
 ## [1.0.63] - 2026-11-13
 
 ### Fixed
