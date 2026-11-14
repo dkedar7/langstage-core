@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.0.65] - 2026-11-14
+
+### Fixed
+- **A finished message keeps its reasoning (gh #245).** A message that reaches the stream
+  without token streaming (a model with `disable_streaming=True`, a non-streaming
+  provider, a node that returns an `AIMessage`) lost its `reasoning` / `thinking` blocks:
+  the reply text arrived, but no `reasoning` frame did, and `TurnResult.reasoning` was
+  empty. Only a token-streamed reasoning delta ever became a frame. The shared run path
+  behind `iter_event_frames`, `iter_chunk_frames` and the served endpoint now sends a
+  finished message's reasoning before its text and its tool calls, the order a streamed
+  model produces: one `reasoning` frame per block on the in-process wires, and
+  `REASONING_START` / `REASONING_MESSAGE_*` / `REASONING_END` events on the served
+  endpoint.
+  - Shapes read: `{"type": "reasoning", "reasoning"}`, `{"type": "thinking", "thinking"}`
+    (Anthropic), `{"type": "reasoning", "summary": [...]}` (OpenAI Responses API),
+    `{"type": "reasoning_content", ...}` (Bedrock Converse), and
+    `additional_kwargs["reasoning_content"]` / `["reasoning"]` (DeepSeek, Qwen, xAI and
+    other OpenAI-compatible providers). A redacted or empty block sends nothing.
+  - On the served endpoint a reasoning event carries the id `MESSAGES_SNAPSHOT` gives the
+    same block (the block's own id, else `<message id>-reasoning-<index>`), so a client
+    can match the two.
+  - A `reasoning` frame for a finished message names the node that produced the message.
+  - Nothing is sent twice: a token-streamed message's reasoning, the reasoning a resumed
+    turn sent before it paused, and a message whose stream events arrive after it was
+    sent from the checkpoint are each sent once. This holds inside a subgraph node too.
+  Every stage gets this by upgrading core.
+- **`langstage-agui`: an agent module that raises at import time is one `error:` line
+  (gh #244).** `--verify`, `-m`, `-m --json` and bare serve printed a raw traceback when
+  the agent module raised anything but an import, attribute, file, value or type error
+  while it loaded. The usual case is the README's own real-model pattern,
+  `api_key=os.environ["OPENAI_API_KEY"]` at module level, run with the key unset. It is
+  now `error: could not load agent 'my_agent.py:graph': KeyError: 'OPENAI_API_KEY'` on
+  stderr, exit `1`, with the exception type in the line because a bare `KeyError` message
+  is only the key. `LANGSTAGE_DEBUG=1` adds the traceback after the line, for every load
+  failure. `load_agent_spec()` itself still raises as before.
+
 ## [1.0.64] - 2026-11-14
 
 ### Fixed

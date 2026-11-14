@@ -629,7 +629,8 @@ async def _full_text_by_id(agent, thread_id):
     a plausible-but-partial reply (gh langstage-vscode #75). We re-read the ORIGINAL
     LangChain messages from the graph's checkpoint and use ``message.text`` (which joins
     all ``text`` blocks like ``AIMessage.text``, and ignores reasoning/thinking blocks —
-    those already surface as separate ``reasoning`` frames). Best-effort: any failure
+    those surface as separate ``reasoning`` frames, see :func:`_message_reasoning`).
+    Best-effort: any failure
     (no ``.graph``, no checkpointer, an odd state schema) returns ``{}`` and the snapshot
     walk falls back to ag-ui's (possibly truncated) content — never fatal.
     """
@@ -662,7 +663,7 @@ async def _full_text_by_id(agent, thread_id):
     return out
 
 
-def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, step_nodes, current_node, full_text_by_id=None):
+def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, step_nodes, current_node, full_text_by_id=None, reasoned_ids=None, sent_reasoning_ids=None):
     """Yield the not-yet-emitted items from a final ``MessagesSnapshotEvent``.
 
     Shared by both ``iter_*`` mappings so the two wires can't drift on snapshot
@@ -675,12 +676,24 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
     (gh #91). This walks assistant **and** tool messages and yields normalized
     items each wire renders in its own vocabulary:
 
+      ``{"kind": "reasoning", "text", "node", "id", "message_id"}`` — a reasoning block not streamed
       ``{"kind": "content", "text", "node", "id"}``    — an assistant text message
       ``{"kind": "tool_call", "name", "args", "id", "message_id"}`` — a tool call not streamed
       ``{"kind": "tool_result", "name", "raw", "id", "message_id", "error"}`` — a result not streamed
 
     Within one assistant message its text is yielded BEFORE its tool calls, so a
     "narrate, then call a tool" message renders in causal order (gh langstage-cli #119).
+    Its reasoning (``reasoning`` / ``thinking`` blocks) is yielded before both, the
+    order a token-streamed model produces. A finished message used to lose its
+    reasoning: only the streaming ``ReasoningMessageContentEvent`` ever became a
+    ``reasoning`` frame (gh #245). The reasoning comes from the message's own
+    ``reasoning`` attribute (a checkpoint message, see :func:`_as_snapshot_message`)
+    or from the ag-ui ``role == "reasoning"`` messages that precede it in a
+    ``MessagesSnapshotEvent``. It is yielded only when NO part of the message was
+    streamed (its id, its tool calls) and its id is not in ``reasoned_ids``; a block
+    whose own id is in ``sent_reasoning_ids`` (the ids of reasoning events already
+    sent) is skipped too, which covers reasoning the adapter streamed for a subagent
+    and then lists in the snapshot ahead of some other message.
 
     Dedup mirrors how a fully-streamed turn already emitted things during the run,
     so nothing double-renders: content by message id (``streamed_ids``), tool calls
@@ -709,10 +722,36 @@ def _snapshot_items(messages, *, streamed_ids, tool_names, streamed_result_ids, 
     # where ToolCallStart never populated the shared tool_names.
     names = dict(tool_names)
     ci = 0
+    held_reasoning: list = []
     for m in tail:
         role = getattr(m, "role", None)
+        if role == "reasoning":
+            # ag-ui puts a message's reasoning blocks in the snapshot as separate
+            # messages, right before the assistant message that owns them.
+            text = getattr(m, "content", None)
+            if isinstance(text, str) and text:
+                held_reasoning.append((getattr(m, "id", None), text))
+            continue
+        owned_reasoning, held_reasoning = held_reasoning, []
         if role == "assistant":
             mid = getattr(m, "id", None)
+            reasoning = list(getattr(m, "reasoning", None) or ()) or owned_reasoning
+            if sent_reasoning_ids:
+                reasoning = [r for r in reasoning if r[0] not in sent_reasoning_ids]
+            if (
+                reasoning
+                and mid not in streamed_ids
+                and not (reasoned_ids and str(mid) in reasoned_ids)
+                and not any(getattr(tc, "id", None) in tool_names
+                            for tc in getattr(m, "tool_calls", None) or [])
+            ):
+                idx = ci - offset
+                node = (step_nodes[idx]
+                        if getattr(m, "content", None) and 0 <= idx < len(step_nodes)
+                        else current_node)
+                for rid, text in reasoning:
+                    yield {"kind": "reasoning", "text": text, "node": node, "id": rid,
+                           "message_id": mid}
             # In-message order: a message's own TEXT comes before its tool calls. The
             # #91 walk yielded the tool calls first, so a finished
             # ``AIMessage("Let me check the weather.", tool_calls=[...])`` rendered its
@@ -781,6 +820,108 @@ def _message_text(m) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _reasoning_block_text(block: dict) -> str:
+    """The readable text of one reasoning content block, ``""`` when it has none.
+
+    The shapes providers use: ``{"type": "thinking", "thinking": ...}`` (Anthropic),
+    ``{"type": "reasoning", "reasoning": ...}`` (LangChain's standard block),
+    ``{"type": "reasoning", "summary": [{"text": ...}]}`` (OpenAI Responses API) and
+    ``{"type": "reasoning_content", "reasoning_content": {"text": ...}}`` (Bedrock
+    Converse). A redacted or encrypted block has no text and is skipped.
+    """
+    kind = block.get("type")
+    if kind == "thinking":
+        val = block.get("thinking")
+    elif kind == "reasoning":
+        summary = block.get("summary")
+        if isinstance(summary, list):
+            parts = [part["text"] for part in summary
+                     if isinstance(part, dict) and isinstance(part.get("text"), str)
+                     and part["text"]]
+            if parts:
+                return "\n".join(parts)
+        val = block.get("reasoning") or block.get("text")
+    elif kind == "reasoning_content":
+        inner = block.get("reasoning_content")
+        val = inner.get("text") if isinstance(inner, dict) else inner
+    else:
+        return ""
+    return val if isinstance(val, str) else ""
+
+
+def _message_reasoning(m) -> list:
+    """``[(reasoning id, text), ...]`` for a LangChain message's reasoning (gh #245).
+
+    One entry per ``reasoning`` / ``thinking`` content block, else the
+    ``additional_kwargs`` forms (``reasoning_content``: DeepSeek, Qwen, xAI and other
+    OpenAI-compatible providers; ``reasoning``: the older OpenAI Responses shape).
+    The id is the block's own, else ``<message id>-reasoning-<block index>``: the id
+    ag-ui-langgraph gives the same block in its ``MessagesSnapshotEvent``, so an AG-UI
+    client can match the two.
+    """
+    get = m.get if isinstance(m, dict) else (lambda key: getattr(m, key, None))
+    mid = get("id")
+    out: list = []
+    content = get("content")
+    if isinstance(content, list):
+        for index, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            text = _reasoning_block_text(block)
+            if text:
+                out.append((str(block.get("id") or f"{mid}-reasoning-{index}"), text))
+    if not out:
+        extra = get("additional_kwargs")
+        if isinstance(extra, dict):
+            text = extra.get("reasoning_content")
+            if not (isinstance(text, str) and text):
+                legacy = extra.get("reasoning")
+                text = (_reasoning_block_text({**legacy, "type": "reasoning"})
+                        if isinstance(legacy, dict) else "")
+            if text:
+                out.append((f"{mid}-reasoning-0", text))
+    return out
+
+
+def _reasoning_events(reasoning_id: str, text: str) -> list:
+    """The AG-UI events for one finished reasoning block, as a streamed one sends them."""
+    try:
+        from ag_ui.core import (
+            EventType,
+            ReasoningEndEvent,
+            ReasoningMessageContentEvent,
+            ReasoningMessageEndEvent,
+            ReasoningMessageStartEvent,
+            ReasoningStartEvent,
+        )
+    except ImportError:  # an ag-ui-protocol from before the Reasoning events
+        try:
+            from ag_ui.core import (
+                EventType,
+                ThinkingTextMessageContentEvent,
+                ThinkingTextMessageEndEvent,
+                ThinkingTextMessageStartEvent,
+            )
+        except ImportError:  # pragma: no cover
+            return []
+        return [
+            ThinkingTextMessageStartEvent(type=EventType.THINKING_TEXT_MESSAGE_START),
+            ThinkingTextMessageContentEvent(
+                type=EventType.THINKING_TEXT_MESSAGE_CONTENT, delta=text),
+            ThinkingTextMessageEndEvent(type=EventType.THINKING_TEXT_MESSAGE_END),
+        ]
+    return [
+        ReasoningStartEvent(type=EventType.REASONING_START, message_id=reasoning_id),
+        ReasoningMessageStartEvent(
+            type=EventType.REASONING_MESSAGE_START, message_id=reasoning_id, role="reasoning"),
+        ReasoningMessageContentEvent(
+            type=EventType.REASONING_MESSAGE_CONTENT, message_id=reasoning_id, delta=text),
+        ReasoningMessageEndEvent(
+            type=EventType.REASONING_MESSAGE_END, message_id=reasoning_id),
+        ReasoningEndEvent(type=EventType.REASONING_END, message_id=reasoning_id),
+    ]
+
+
 def _as_snapshot_message(m):
     """Adapt a checkpoint (LangChain) message to the attribute shape
     :func:`_snapshot_items` walks (the ag-ui ``MessagesSnapshotEvent`` message shape):
@@ -796,6 +937,7 @@ def _as_snapshot_message(m):
     out = SimpleNamespace(role=role, id=str(mid) if mid is not None else None,
                           content=_message_text(m))
     if role == "assistant":
+        out.reasoning = _message_reasoning(m)
         calls = []
         for tc in getattr(m, "tool_calls", None) or []:
             tc = tc if isinstance(tc, dict) else {}
@@ -993,6 +1135,14 @@ class _TurnStream:
         # id (gh #242). One call is one message, but its chunks need not share an id.
         self._chunk_ids_by_run: dict[str, set] = {}
         self._ids_of_message: dict[str, set] = {}  # any of those ids -> all of them
+        # Reasoning (gh #245). ``reasoned_ids``: assistant message ids whose reasoning
+        # is already out, streamed by its model call or sent from the checkpoint.
+        self.reasoned_ids: set = set()
+        self._synth_reasoned: set = set()  # ...the ones sent from the checkpoint
+        self.reasoning_event_ids: set = set()  # ids of the reasoning events sent so far
+        self._reasoning_owner: dict[str, str] = {}  # reasoning event id -> message id
+        self._reasoning_runs: set = set()  # model calls that streamed reasoning
+        self._model_run: str | None = None  # the model call streaming right now
 
     def this_turn(self, messages) -> list:
         """``messages`` minus those already in the checkpoint before this run.
@@ -1006,13 +1156,33 @@ class _TurnStream:
         """
         if not self._pre_ids:
             return list(messages)
-        return [m for m in messages if str(getattr(m, "id", None)) not in self._pre_ids]
+        out: list = []
+        # ag-ui's ``role == "reasoning"`` messages carry their own ids, never a
+        # checkpoint id, and precede the assistant message that owns them. They go
+        # with their owner: kept if it is kept, dropped if it is dropped, or a resumed
+        # turn would hand its pre-pause reasoning to the first post-pause message.
+        held: list = []
+        for m in messages:
+            if getattr(m, "role", None) == "reasoning":
+                held.append(m)
+                continue
+            if str(getattr(m, "id", None)) not in self._pre_ids:
+                out.extend(held)
+                out.append(m)
+            held = []
+        return out
 
     def node_of_message(self, message_id, default: str) -> str:
         """The node that produced message ``message_id``, else ``default``."""
         if message_id is None:
             return default
         return self._node_by_message.get(str(message_id), default)
+
+    def node_of_reasoning(self, reasoning_id, default: str) -> str:
+        """The node whose message owns reasoning ``reasoning_id`` (one sent from the
+        checkpoint), else ``default``."""
+        owner = self._reasoning_owner.get(str(reasoning_id)) if reasoning_id is not None else None
+        return self.node_of_message(owner, default)
 
     def node_of_call(self, tool_call_id, default: str) -> str:
         """The node whose message carried tool call ``tool_call_id``, else ``default``."""
@@ -1054,6 +1224,12 @@ class _TurnStream:
         node = meta.get("langgraph_node")
         if kind in ("on_chat_model_stream", "on_chat_model_end"):
             self._note_model_ids(raw.get("run_id"), data.get("chunk"), data.get("output"))
+            if kind == "on_chat_model_stream" and raw.get("run_id") is not None:
+                # The adapter sends this RawEvent before the events it derives from
+                # the chunk, so the reasoning events that follow belong to this call.
+                self._model_run = str(raw["run_id"])
+                if _message_reasoning(data.get("chunk")):
+                    self._reasoning_runs.add(self._model_run)
         elif kind == "on_chain_end" and node and raw.get("name") == node:
             self._note_update(node, data.get("output"))
         elif kind == "on_chain_stream" and not node:
@@ -1094,6 +1270,19 @@ class _TurnStream:
         for ids in self._chunk_ids_by_run.values():
             if len(ids) > 1 and not ids.isdisjoint(self.text_ids):
                 self.text_ids |= ids
+        # A message whose model call streamed its reasoning has it out already, under
+        # every id that call used (gh #245).
+        for run in self._reasoning_runs:
+            self.reasoned_ids |= self._chunk_ids_by_run.get(run, set())
+
+    def _reasoning_sent_from_checkpoint(self) -> bool:
+        """Whether the model call streaming right now is a message whose reasoning was
+        already sent whole from the checkpoint: the graph ran ahead of the reader, as
+        in :meth:`_already_sent_from_checkpoint` (gh #242, #245)."""
+        if not self._synth_reasoned or self._model_run is None:
+            return False
+        ids = self._chunk_ids_by_run.get(self._model_run)
+        return bool(ids) and not ids.isdisjoint(self._synth_reasoned)
 
     def _already_sent_from_checkpoint(self, message_id) -> bool:
         """Whether this streamed message was already sent whole from the checkpoint.
@@ -1230,9 +1419,22 @@ class _TurnStream:
             streamed_result_ids=self.result_ids,
             step_nodes=[],
             current_node="",
+            reasoned_ids=self.reasoned_ids,
         ):
             kind = item["kind"]
-            if kind == "content":
+            if kind == "reasoning":
+                # A finished message's reasoning, before its text and tool calls, as
+                # a token-streamed model sends it (gh #245).
+                owner, rid = item.get("message_id"), item["id"]
+                if owner is None or rid is None or not item["text"]:
+                    continue
+                self.reasoned_ids.add(str(owner))
+                self._synth_reasoned.add(str(owner))
+                self._reasoning_owner[str(rid)] = str(owner)
+                self.reasoning_event_ids.add(str(rid))
+                for synth in _reasoning_events(str(rid), item["text"]):
+                    yield synth
+            elif kind == "content":
                 mid = item["id"]
                 if mid is None or not item["text"]:
                     continue
@@ -1298,6 +1500,12 @@ class _TurnStream:
                         continue  # sent whole from the checkpoint; don't send it again
                     if mid is not None:
                         self.text_ids.add(mid)
+                elif (t.startswith(("Reasoning", "Thinking"))
+                      and t != "ReasoningEncryptedValueEvent"):
+                    if self._reasoning_sent_from_checkpoint():
+                        continue  # sent whole from the checkpoint; don't send it again
+                    if getattr(ev, "message_id", None) is not None:
+                        self.reasoning_event_ids.add(ev.message_id)
                 elif t in ("ToolCallStartEvent", "ToolCallArgsEvent", "ToolCallEndEvent",
                            "ToolCallChunkEvent"):
                     tcid = getattr(ev, "tool_call_id", None)
@@ -1918,7 +2126,11 @@ async def iter_event_frames(
                 # snapshot for the reply. (gh #71)
                 delta = getattr(ev, "delta", "")
                 if delta:
-                    yield {"type": "reasoning", "content": delta, "node": current_node}
+                    # node: for a finished message's reasoning, the node that made the
+                    # message, as for its content (gh #188, #245).
+                    yield {"type": "reasoning", "content": delta,
+                           "node": stream.node_of_reasoning(
+                               getattr(ev, "message_id", None), current_node)}
             elif t == "ToolCallStartEvent":
                 tool_names[ev.tool_call_id] = ev.tool_call_name
                 tool_args[ev.tool_call_id] = ""
@@ -2009,8 +2221,15 @@ async def iter_event_frames(
                     step_nodes=step_nodes,
                     current_node=current_node,
                     full_text_by_id=full_text_by_id,
+                    reasoned_ids=stream.reasoned_ids,
+                    sent_reasoning_ids=stream.reasoning_event_ids,
                 ):
-                    if item["kind"] == "content":
+                    if item["kind"] == "reasoning":
+                        # Reasoning the checkpoint walk could not send (an agent with
+                        # no readable checkpoint): the snapshot is its only source.
+                        yield {"type": "reasoning", "content": item["text"],
+                               "node": stream.node_of_message(item["message_id"], item["node"])}
+                    elif item["kind"] == "content":
                         yield {"type": "content", "content": item["text"],
                                "role": "assistant",
                                "node": stream.node_of_message(item["id"], item["node"]),
@@ -2187,7 +2406,9 @@ async def iter_chunk_frames(
                 # it, rather than dropping it. Not the answer, so no streamed_text. (gh #71)
                 delta = getattr(ev, "delta", "")
                 if delta:
-                    yield {"status": "streaming", "reasoning": delta, "node": current_node}
+                    yield {"status": "streaming", "reasoning": delta,
+                           "node": stream.node_of_reasoning(
+                               getattr(ev, "message_id", None), current_node)}
             elif t == "ToolCallStartEvent":
                 tool_buf[ev.tool_call_id] = {"name": ev.tool_call_name, "args": ""}
                 tool_names[ev.tool_call_id] = ev.tool_call_name
@@ -2279,8 +2500,13 @@ async def iter_chunk_frames(
                     step_nodes=step_nodes,
                     current_node=current_node,
                     full_text_by_id=full_text_by_id,
+                    reasoned_ids=stream.reasoned_ids,
+                    sent_reasoning_ids=stream.reasoning_event_ids,
                 ):
-                    if item["kind"] == "content":
+                    if item["kind"] == "reasoning":
+                        yield {"status": "streaming", "reasoning": item["text"],
+                               "node": stream.node_of_message(item["message_id"], item["node"])}
+                    elif item["kind"] == "content":
                         yield {"status": "streaming", "chunk": item["text"],
                                "node": stream.node_of_message(item["id"], item["node"]),
                                "message_id": item["id"]}
