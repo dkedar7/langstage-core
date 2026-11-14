@@ -150,6 +150,16 @@ def _run_message_to(graph: Any, message: str, *, as_json: bool, config: Any, out
     return _exit_code_for(outcome)
 
 
+def _print_debug_traceback() -> None:
+    """Write the active exception's traceback to stderr when debug is on
+    (``LANGSTAGE_DEBUG``, the legacy name, or ``debug = true``); nothing otherwise."""
+    from . import _debug_traceback_extra
+
+    tb = _debug_traceback_extra().get("traceback")
+    if tb:
+        sys.stderr.write(tb if tb.endswith("\n") else tb + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for ``langstage-agui``.
 
@@ -384,8 +394,21 @@ def _main(argv: list[str] | None = None) -> int:
     # spec that resolved to a str (gh langstage-cli #149).
     except (ImportError, AttributeError, OSError, ValueError, TypeError) as exc:
         print(f"error: could not load agent {spec!r}: {exc}", file=sys.stderr)
+        _print_debug_traceback()
         # A load failure is a failure (1) on every command, never 2 (== paused)
         # (gh #124, ADR 0007).
+        return EXIT_FAIL
+    except Exception as exc:  # noqa: BLE001 - the agent module's own import-time error
+        # Anything ELSE the agent module raises while its body runs: the README's
+        # `api_key=os.environ["OPENAI_API_KEY"]` with the key unset (KeyError), a
+        # RuntimeError, a provider SDK's own exception. The tuple above was chosen for
+        # spec mistakes (gh #100), so these escaped as a raw traceback on --verify, -m,
+        # --json and serve. Same one line, with the exception type, since a bare
+        # `KeyError` message is only the key. The traceback only under LANGSTAGE_DEBUG,
+        # as for a turn-time crash (gh #195, #198). (gh #244)
+        print(f"error: could not load agent {spec!r}: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        _print_debug_traceback()
         return EXIT_FAIL
 
     # --verify: the question every adopter asks right after --agent — "did it load
