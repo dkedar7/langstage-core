@@ -79,7 +79,7 @@ Both wires carry the same information; the table is the contract (keys marked *n
 | `{"type": "complete", "outcome"}` | `{"status": "complete", "outcome"}` | Terminal. `outcome` (*new*) is `"interrupted"` if the turn paused on an interrupt, else `"complete"`. |
 | `{"type": "error", "error"}` | `{"status": "error", "error"}` | Terminal — nothing follows it (no `complete`). Content earlier nodes already produced is emitted before it. |
 
-Frames arrive in message order: a node that returns a *finished* `AIMessage` (no token streaming — `model.invoke()`, a router, a canned reply) is emitted when that node finishes, its text before its own tool calls (also when the agent runs as a subgraph node of a supervisor graph), and the served AG-UI endpoint (`build_app` / `serve`) streams the same `TEXT_MESSAGE_*` / `TOOL_CALL_*` events the in-process wires are built from.
+Frames arrive in message order: a node that returns a *finished* `AIMessage` (no token streaming — `model.invoke()`, a router, a canned reply) is emitted when that node finishes, its text before its own tool calls (also when the agent runs as a subgraph node of a supervisor graph); a token-streamed message is sent once, whichever ids its chunks carry (the OpenAI Responses API uses two); and the served AG-UI endpoint (`build_app` / `serve`) streams the same `TEXT_MESSAGE_*` / `TOOL_CALL_*` events the in-process wires are built from.
 
 #### See every frame type, keyless
 
