@@ -15,8 +15,15 @@
   again. The shared run path behind `iter_event_frames`, `iter_chunk_frames` and the
   served endpoint now records every id a model call streams under and counts the message
   as streamed under all of them. This covers any provider whose chunks for one call don't
-  share an id, at top level and inside a subgraph node. Chat Completions models were not
-  affected. Every stage gets this by upgrading core.
+  share an id, at top level and inside a subgraph node. Every stage gets this by
+  upgrading core.
+- **A message sent from the checkpoint is not sent again when its stream arrives
+  (gh #242).** The graph can run ahead of whoever reads its events: a fast model call can
+  finish and commit its message while an earlier step's events are still being read. That
+  message was then sent whole when the earlier step finished, and a second time when its
+  own stream events were read. Streamed text for a message already sent from the
+  checkpoint is now dropped, under any id its model call used, the way a repeated tool
+  call or tool result already was. This could affect any streaming model, on any API.
 
 ## [1.0.63] - 2026-11-13
 
