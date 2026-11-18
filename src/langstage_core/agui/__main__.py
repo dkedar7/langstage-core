@@ -445,6 +445,27 @@ def _main(argv: list[str] | None = None) -> int:
 
     name = args.name or (DEMO_NAMES[args.demo] if args.demo else DEFAULT_AGENT_NAME)
     url = f"http://{cfg.host}:{cfg.port}{args.path}"
+    # Build the agent BEFORE binding and before the banner. A spec that loads but isn't
+    # a runnable graph (a StateGraph nobody called .compile() on, `graph = 42`) was only
+    # rejected inside serve() -> build_app() -> build_agent(), after the "Serving … at
+    # <url>" line had printed, so the user saw a success banner and then a raw
+    # traceback. --verify and --message already answer this object with one `error:`
+    # line (gh #180); serving now does too, with the same detail text. It runs before
+    # the bind so the error path never holds a socket, and the agent built here is the
+    # one served: add_agui_endpoint() takes a built agent as-is, so nothing is built
+    # twice. Any exception counts, as on the --message path: the line names its type,
+    # and LANGSTAGE_DEBUG=1 prints where it was raised. (gh #247)
+    from . import _is_langgraph_agent, build_agent
+
+    try:
+        agent = graph if _is_langgraph_agent(graph) else build_agent(
+            graph, name=name, config=run_config
+        )
+    except Exception as exc:  # noqa: BLE001 - reported as one clean line, like --verify
+        safe_print(f"error: cannot serve agent {spec!r}: {type(exc).__name__}: {exc}",
+                   file=sys.stderr)
+        _print_debug_traceback()
+        return EXIT_FAIL
     # Bind BEFORE the banner. A port already in use used to print the definitive
     # "Serving … at <url>" success line to stdout and only THEN have uvicorn log the
     # bind error and exit 3 — the false-green banner #100/#134 removed for the other
@@ -462,10 +483,10 @@ def _main(argv: list[str] | None = None) -> int:
     # cfg.host/cfg.port are the resolved values --show-config prints, so the
     # advertised config and the real bind agree.
     safe_print(f"Serving {spec!r} over AG-UI at {url}", flush=True)
-    # Pass the loaded graph, not the spec: serve() accepts either, and handing it
-    # the graph keeps the module from being imported (and its side effects run) twice.
+    # Pass the built agent, not the spec: serve() accepts either, and handing it the
+    # agent keeps the module from being imported (and its side effects run) twice.
     try:
-        serve(graph, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config,
+        serve(agent, host=cfg.host, port=cfg.port, path=args.path, name=name, config=run_config,
               sock=sock, cors_origins=args.cors)
     finally:
         sock.close()
