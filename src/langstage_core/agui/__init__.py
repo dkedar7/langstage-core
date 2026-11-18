@@ -483,8 +483,10 @@ def serve(
 
     ``spec_or_graph`` is either an agent spec string (``module:attr`` or
     ``path/to/file.py:attr`` — resolved via the host layer's
-    :func:`~langstage_core.host.load_agent_spec`) or an already
-    compiled graph. Blocks running a uvicorn server.
+    :func:`~langstage_core.host.load_agent_spec`), an already
+    compiled graph, or an agent :func:`build_agent` already built (served as-is; the
+    CLI builds it first so a non-runnable object is reported before its banner,
+    gh #247). Blocks running a uvicorn server.
 
     ``config`` is forwarded to :func:`build_agent` (e.g. ``{"configurable": {...}}``);
     ``langstage-agui`` passes the ``langstage.toml`` ``[configurable]`` table here

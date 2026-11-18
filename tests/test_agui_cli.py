@@ -12,6 +12,18 @@ import langstage_core.agui as agui_pkg
 from langstage_core.agui.__main__ import main
 
 
+# A real compiled graph for the serve happy path: since gh #247 main() builds the agent
+# before the banner, so a stand-in object (a dict, ``object()``) is refused there.
+_COMPILED_GRAPH_MODULE = (
+    "from langgraph.graph import StateGraph, MessagesState, START, END\n"
+    "_g = StateGraph(MessagesState)\n"
+    "_g.add_node('the_real_node', lambda s: {})\n"
+    "_g.add_edge(START, 'the_real_node')\n"
+    "_g.add_edge('the_real_node', END)\n"
+    "graph = _g.compile()\n"
+)
+
+
 class _FakeSock:
     """Stands in for the pre-bound listening socket main() hands serve() (gh #143)."""
 
@@ -165,8 +177,9 @@ class TestInvalidSpecFailsBeforeBanner:
         self, stub_serve, tmp_path, capsys
     ):
         # The happy path must be untouched: banner still printed, server still started.
+        pytest.importorskip("ag_ui_langgraph")
         agent = tmp_path / "good_agent.py"
-        agent.write_text("graph = {'marker': 'the-real-graph'}\n")
+        agent.write_text(_COMPILED_GRAPH_MODULE)
         spec = f"{agent}:graph"
 
         rc = main(["--agent", spec, "--port", "9111"])
@@ -176,11 +189,14 @@ class TestInvalidSpecFailsBeforeBanner:
         assert f"Serving {spec!r} over AG-UI at" in out
         assert "9111" in out
         assert len(stub_serve) == 1
-        graph, kwargs = stub_serve[0]
-        # serve() accepts a spec string OR a loaded graph; it is handed the already
-        # loaded graph so the spec is not resolved a second time.
-        assert graph == {"marker": "the-real-graph"}
-        assert not isinstance(graph, str)
+        served, kwargs = stub_serve[0]
+        # serve() accepts a spec string, a loaded graph or a built agent; it is handed
+        # the agent main() built from the already loaded graph, so the spec is not
+        # resolved a second time. (Built before the banner since gh #247: an object
+        # that isn't a runnable graph no longer gets this far.)
+        assert not isinstance(served, str)
+        assert agui_pkg._is_langgraph_agent(served)
+        assert "the_real_node" in served.graph.nodes
         assert kwargs["port"] == 9111
 
     def test_spec_module_is_imported_exactly_once(self, stub_serve, tmp_path, capsys):
@@ -189,12 +205,13 @@ class TestInvalidSpecFailsBeforeBanner:
         A file-path spec gets a fresh unique module name per load, so loading twice
         would execute the module body twice — this pins that it happens once.
         """
+        pytest.importorskip("ag_ui_langgraph")
         marker = tmp_path / "imports.log"
         agent = tmp_path / "side_effect_agent.py"
         agent.write_text(
             "from pathlib import Path\n"
             f"Path(r'{marker}').open('a').write('imported\\n')\n"
-            "graph = object()\n"
+            + _COMPILED_GRAPH_MODULE
         )
 
         rc = main(["--agent", f"{agent}:graph"])

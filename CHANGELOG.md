@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.66] - 2026-11-18
+
+### Fixed
+- **`langstage-agui`: serving a spec that loads but isn't a runnable graph is one `error:`
+  line, with no banner (gh #247).** `langstage-agui --agent my_agent.py:graph` printed
+  `Serving 'my_agent.py:graph' over AG-UI at <url>` and then a raw traceback when the
+  object was a `StateGraph` nobody called `.compile()` on, or any non-graph value such as
+  `graph = 42`. `--verify` and `--message` already reported the same object cleanly
+  (gh #180); the serve path only found out inside `serve()`, after the banner. Now the
+  agent is built before the port is bound and before the banner, so the output is
+  `error: cannot serve agent 'my_agent.py:graph': TypeError: build_agent expected a
+  compiled LangGraph graph, but got an uncompiled StateGraph; call .compile() on it
+  first.` on stderr, nothing on stdout, and exit `1`. The detail after the prefix is the
+  one `--verify` and `--message` print. `LANGSTAGE_DEBUG=1` adds the traceback.
+  - The agent built for that check is the one served, so a valid graph is still built
+    once and its module imported once. A spec that resolves to an already-built agent is
+    served as-is, as before.
+  - With a bad agent and a busy port together, the agent error is reported and the port
+    is not touched.
+  - Python callers are unchanged: `build_agent()`, `build_app()` and `serve()` still
+    raise the `TypeError`.
+
 ## [1.0.65] - 2026-11-14
 
 ### Fixed
