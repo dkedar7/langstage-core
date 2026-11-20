@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.67] - 2026-11-20
+
+### Fixed
+- **`TaskRunner.retry()` continues a run from its last checkpoint instead of starting
+  over (gh #249).** Retrying a `failed` or `cancelled` task re-sent its prompt on the same
+  thread, so the graph ran again from `START`: every step that had finished before the
+  failure ran a second time, side effects included, and the prompt appeared twice in the
+  thread. The docstring already promised a resume. Now a run that stopped partway (the
+  thread's last checkpoint still has nodes to run) continues from that checkpoint with no
+  new input: finished steps don't run again, nothing is added to the thread, and the
+  task's result is the resumed run's reply. The web Board's **Retry** gets this for free.
+  - A task cancelled while paused on an approval comes back to `review_needed` with the
+    same approval.
+  - A task with nothing checkpointed for its run (cancelled while still queued, or an
+    in-memory checkpoint lost to a restart) still starts over with its prompt.
+  - A task requeued after a restart (`requeue_orphans`) with a durable checkpointer also
+    continues where it stopped.
+  - New: `SessionAdapter.has_unfinished_run(session_id)` and
+    `SessionAdapter.submit_continue(session_id)`, and `iter_event_frames(...,
+    continue_run=True)`.
+
 ## [1.0.66] - 2026-11-18
 
 ### Fixed
