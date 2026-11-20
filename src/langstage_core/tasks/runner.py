@@ -248,7 +248,17 @@ class TaskRunner:
 
     async def retry(self, task_id: str) -> bool:
         """Re-queue a ``failed`` / ``cancelled`` task (same thread → resumes
-        from its last checkpoint where a durable saver is configured)."""
+        from its last checkpoint where a durable saver is configured).
+
+        The re-queued record is marked ``resume_from_checkpoint`` (gh #249): the
+        worker then goes through ``SessionAdapter.submit_resume`` —
+        ``graph.astream(None, config)`` — instead of re-sending the prompt.
+        Re-sending would append a duplicate user message to the thread and
+        re-run every completed, side-effecting node; the checkpoint resume
+        keeps finished nodes finished and re-runs only the one the thread is
+        waiting on. Threads with nothing to resume (no durable saver, or no
+        pending checkpoint) fall back to the fresh submit inside ``_run_one``.
+        """
         task = await self._store.get(task_id)
         if task is None or task.get("state") not in {FAILED, CANCELLED}:
             return False
@@ -258,6 +268,7 @@ class TaskRunner:
             error=None,
             finished_at=None,
             started_at=None,
+            resume_from_checkpoint=True,
         )
         self._wake.set()
         return True
@@ -290,11 +301,24 @@ class TaskRunner:
         # Tag the context so any sub-task the agent spawns records this as parent.
         token = current_task_id.set(task_id)
         try:
-            session = self._adapter.submit_message(
-                task["thread_id"],
-                task["prompt"],
-                context_parts=[f"[{self._context_label}: {task.get('title', task_id)}]"],
-            )
+            session = None
+            if task.get("resume_from_checkpoint") and hasattr(self._adapter, "submit_resume"):
+                # gh #249: a retried task keeps its thread; resume from the
+                # thread's last checkpoint instead of re-sending the prompt
+                # (which duplicates it in the thread and re-runs every completed,
+                # side-effecting node). submit_resume returns None when the thread
+                # has nothing to resume — no durable saver, no pending checkpoint —
+                # then the fresh submit below keeps retry working as before.
+                session = await self._adapter.submit_resume(task["thread_id"])
+                # Consume the flag: a later crash-recovery requeue (requeue_orphans)
+                # stays on the established fresh-submit path.
+                await self._store.update(task_id, resume_from_checkpoint=False)
+            if session is None:
+                session = self._adapter.submit_message(
+                    task["thread_id"],
+                    task["prompt"],
+                    context_parts=[f"[{self._context_label}: {task.get('title', task_id)}]"],
+                )
         finally:
             current_task_id.reset(token)
         await self._await_run(task_id, session)

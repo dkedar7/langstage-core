@@ -43,6 +43,11 @@ class Task(TypedDict, total=False):
     artifacts: Optional[list[Any]]
     error: Optional[str]
     interrupt: Optional[dict[str, Any]]  # serialized InterruptEvent when review_needed
+    # Set by TaskRunner.retry (gh #249): the worker resumes the thread from its
+    # last checkpoint (SessionAdapter.submit_resume) instead of re-sending the
+    # prompt. Cleared by the worker once consumed, so a later crash-recovery
+    # requeue keeps the established fresh-submit behavior.
+    resume_from_checkpoint: Optional[bool]
 
 
 @runtime_checkable

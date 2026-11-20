@@ -189,6 +189,123 @@ class SessionAdapter:
         session.current_task = asyncio.create_task(self._produce(session, message=text))
         return session
 
+    async def submit_resume(self, session_id: str | None) -> Session | None:
+        """Resume a thread from its last checkpoint (the ``retry`` path).
+
+        Drives ``graph.astream(None, config)`` — LangGraph's checkpoint-resume
+        form: completed nodes stay complete (their side effects do not repeat),
+        only the node the thread is waiting on re-runs, and no new user message
+        is appended. Re-submitting the prompt instead re-runs the whole graph
+        from the start and duplicates the message in the thread (gh #249).
+
+        The AG-UI layer cannot express this: a ``RunAgentInput`` always carries
+        a user message, and its continue path runs ``aupdate_state``, which
+        marks the failed node complete — the wrong semantics. So this drives
+        the graph directly (:meth:`_iter_resume_frames`) and maps the update
+        stream onto the same frame vocabulary ``iter_event_frames`` emits,
+        through the same ``_produce`` tail — ``session.outcome`` /
+        ``interrupt`` / ``error`` behave exactly as a submitted message's.
+
+        Returns the Session to consume, or ``None`` when the thread has
+        nothing to resume: a graph without ``astream``/``aget_state``, no
+        checkpointer (``aget_state`` needs one), or no pending work (``next``
+        empty — e.g. the failure predates any checkpoint, or the saver is
+        per-process and this thread state is gone). The caller falls back to
+        :meth:`submit_message` on ``None``, which keeps retry working for
+        graphs without a durable saver.
+        """
+        session = self.get_or_create(session_id)
+        session.cancel_current()
+        graph = self._graph
+        aget_state = getattr(graph, "aget_state", None)
+        if getattr(graph, "astream", None) is None or aget_state is None:
+            return None
+        try:
+            snapshot = await aget_state(dict(session.config))
+        except Exception:
+            # A graph without a checkpointer raises here — nothing to resume.
+            return None
+        if snapshot is None or not getattr(snapshot, "next", ()):
+            return None
+        session.current_task = asyncio.create_task(
+            self._produce(session, frames=self._iter_resume_frames(session))
+        )
+        return session
+
+    async def _iter_resume_frames(self, session: Session) -> AsyncIterator[dict[str, Any]]:
+        """Yield the standard frame vocabulary from a checkpoint-resume stream.
+
+        ``stream_mode="updates"`` delivers one ``{node: update}`` chunk per
+        completed super-step. An ``AIMessage`` in an update becomes ``content``
+        (its text) and ``tool_start`` (its tool calls) frames; a ``ToolMessage``
+        becomes the matching ``tool_end``. A HITL interrupt arrives as an
+        ``__interrupt__`` chunk of raw ``Interrupt`` objects — decoded with the
+        shared :func:`~langstage_core.agui._normalize_interrupt` into the same
+        ``interrupt`` frame the AG-UI wire emits (so a resumed run that pauses
+        on a gate flows into ``review_needed`` and answers via
+        :meth:`submit_decisions` like any other). Errors surface as the
+        terminal ``error`` frame instead of propagating out of the iterator
+        (gh #93's contract); a clean end yields ``complete``, marked
+        ``interrupted`` when an interrupt frame went out (gh #152's contract).
+
+        Frames here carry finished messages, not token deltas — updates mode
+        sees each message once, when its node completes. The transcript of a
+        resumed run is therefore chunkier than a streamed one, but the
+        vocabulary and the terminal contract are identical.
+        """
+        from ..agui import _message_text, _normalize_interrupt, _truncate_result
+
+        graph = self._graph
+        saw_interrupt = False
+        try:
+            async for chunk in graph.astream(None, dict(session.config), stream_mode="updates"):
+                for node, update in chunk.items():
+                    if node == "__interrupt__":
+                        interrupts = update if isinstance(update, (tuple, list)) else (update,)
+                        for ev in interrupts:
+                            saw_interrupt = True
+                            action_requests, review_configs, decisions = _normalize_interrupt(
+                                getattr(ev, "value", None)
+                            )
+                            yield {
+                                "type": "interrupt",
+                                "action_requests": action_requests,
+                                "review_configs": review_configs,
+                                "allowed_decisions": decisions,
+                            }
+                        continue
+                    if not isinstance(update, dict):
+                        continue
+                    for m in update.get("messages") or ():
+                        if getattr(m, "type", "") == "ai":
+                            text = _message_text(m)
+                            if text:
+                                yield {"type": "content", "content": text, "role": "assistant",
+                                       "node": node, "message_id": getattr(m, "id", None)}
+                            for call in getattr(m, "tool_calls", None) or ():
+                                yield {"type": "tool_start",
+                                       "id": call.get("id") or "",
+                                       "name": call.get("name") or "tool",
+                                       "args": call.get("args") or {},
+                                       "node": node}
+                        elif getattr(m, "type", "") == "tool":
+                            result = _truncate_result(
+                                str(getattr(m, "content", "")), self._max_result_len
+                            )
+                            is_error = getattr(m, "status", "success") == "error"
+                            yield {"type": "tool_end",
+                                   "id": getattr(m, "tool_call_id", "") or "",
+                                   "name": getattr(m, "name", None) or "tool",
+                                   "result": result,
+                                   "status": "error" if is_error else "success",
+                                   "error_message": result if is_error else None,
+                                   "duration_ms": None}
+        except Exception as exc:  # noqa: BLE001 — a node exception mid-resume surfaces
+            # as the terminal `error` frame, matching iter_event_frames (gh #93).
+            yield {"type": "error", "error": f"{type(exc).__name__}: {exc}"}
+            return
+        yield {"type": "complete", "outcome": "interrupted" if saw_interrupt else "complete"}
+
     def submit_decisions(
         self,
         session_id: str | None,
@@ -226,11 +343,18 @@ class SessionAdapter:
         *,
         message: str = "",
         resume: Any = None,
+        frames: Any = None,
     ) -> None:
         """Run one turn through the in-process AG-UI adapter, pushing serialized
         ``event_to_dict`` frames onto the session queue and recording the terminal
         outcome (``session.outcome`` + ``session.interrupt`` / ``session.error``) so
         headless consumers (the task runner) don't re-inspect the event stream.
+
+        ``frames`` swaps the source: an already-built async iterator of frames
+        (the checkpoint-resume stream, :meth:`_iter_resume_frames`) replaces the
+        AG-UI turn entirely, skipping the build/clone below. The tail — push,
+        terminal-outcome bookkeeping, cancellation/error mapping — is shared, so
+        a resumed run is indistinguishable from a submitted one to consumers.
         """
         from ..agui import _terminal_outcome, build_agent, iter_event_frames
 
@@ -239,30 +363,32 @@ class SessionAdapter:
         session.error = None
         pending_interrupt: dict[str, Any] | None = None
         try:
-            # build_agent()/clone() run INSIDE the try: a graph build_agent can't wrap,
-            # a version-incompatible ag-ui-langgraph, or the documented bare install
-            # without the [agui] extra all raise HERE, before the stream. Left outside
-            # the try, that exception escaped _produce uncaught — the session pushed no
-            # terminal frame, session.outcome/error stayed None, the task wedged in
-            # `ongoing` forever (error=None) and the SSE client got keepalives with no
-            # `error` frame. Now a build/clone failure degrades exactly like a stream
-            # error below: an `error` frame + session.outcome="error". (gh #115)
-            if self._agui_agent is None:
-                self._agui_agent = build_agent(self._graph)
-            # Clone per turn: the ag-ui-langgraph agent carries per-run state, so
-            # concurrent sessions (the task runner runs many at once) must not share
-            # one instance. clone() keeps the graph + checkpointer (thread state) but
-            # isolates the run — the same pattern build_app uses per request.
-            run_agent = self._agui_agent.clone()
-            thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
-            async for data in iter_event_frames(
-                run_agent,
-                message,
-                thread_id,
-                resume=resume,
-                max_result_len=self._max_result_len,
-                extractors=self._extractors,
-            ):
+            if frames is None:
+                # build_agent()/clone() run INSIDE the try: a graph build_agent can't wrap,
+                # a version-incompatible ag-ui-langgraph, or the documented bare install
+                # without the [agui] extra all raise HERE, before the stream. Left outside
+                # the try, that exception escaped _produce uncaught — the session pushed no
+                # terminal frame, session.outcome/error stayed None, the task wedged in
+                # `ongoing` forever (error=None) and the SSE client got keepalives with no
+                # `error` frame. Now a build/clone failure degrades exactly like a stream
+                # error below: an `error` frame + session.outcome="error". (gh #115)
+                if self._agui_agent is None:
+                    self._agui_agent = build_agent(self._graph)
+                # Clone per turn: the ag-ui-langgraph agent carries per-run state, so
+                # concurrent sessions (the task runner runs many at once) must not share
+                # one instance. clone() keeps the graph + checkpointer (thread state) but
+                # isolates the run — the same pattern build_app uses per request.
+                run_agent = self._agui_agent.clone()
+                thread_id = session.config.get("configurable", {}).get("thread_id", session.id)
+                frames = iter_event_frames(
+                    run_agent,
+                    message,
+                    thread_id,
+                    resume=resume,
+                    max_result_len=self._max_result_len,
+                    extractors=self._extractors,
+                )
+            async for data in frames:
                 session.push(data)
                 kind = data.get("type")
                 # The complete/interrupted/error decision is the shared
