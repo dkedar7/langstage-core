@@ -198,7 +198,11 @@ Driving a task after `enqueue` (each returns `False` when the task isn't in a st
 
 - `await runner.resume(task_id, decisions)`: answer a `review_needed` task. `decisions` is the decision list (`[{"type": "approve"}]`); the `{"decisions": [...]}` envelope is accepted too.
 - `await runner.followup(task_id, message)`: continue a finished (`done` / `failed` / `cancelled`) task's thread with a new message.
-- `await runner.retry(task_id)`: re-run a `failed` or `cancelled` task.
+- `await runner.retry(task_id)`: run a `failed` or `cancelled` task again on the same
+  thread. A run that stopped partway continues from its last checkpoint, so steps that
+  already finished (and their side effects) don't run twice and the prompt isn't sent
+  again. A task cancelled at an approval comes back to `review_needed`. Only a task
+  with nothing checkpointed (cancelled while queued) starts over with its prompt.
 - `await runner.cancel(task_id)`: stop a queued or running task.
 
 `TASK_TOOLS` (with `set_runner` / `get_runner`) are the agent-facing delegation tools, so an agent can enqueue background work to copies of itself.

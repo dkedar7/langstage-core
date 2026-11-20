@@ -247,8 +247,16 @@ class TaskRunner:
         await self._await_run(task_id, session)
 
     async def retry(self, task_id: str) -> bool:
-        """Re-queue a ``failed`` / ``cancelled`` task (same thread → resumes
-        from its last checkpoint where a durable saver is configured)."""
+        """Re-queue a ``failed`` / ``cancelled`` task on the same thread.
+
+        When the run stopped partway (it raised or was cancelled after the graph saved
+        a checkpoint), the retry continues from that checkpoint: steps that already
+        finished, and their side effects, don't run again, and the prompt isn't sent a
+        second time (gh #249). A task cancelled while paused on an approval comes back
+        to ``review_needed`` with the same approval. Only when nothing was checkpointed
+        for the run (cancelled while still queued, or the checkpoint is gone, for
+        example an in-memory saver after a restart) is the prompt sent again as a
+        fresh turn."""
         task = await self._store.get(task_id)
         if task is None or task.get("state") not in {FAILED, CANCELLED}:
             return False
@@ -288,16 +296,34 @@ class TaskRunner:
     async def _run_one(self, task: Task) -> None:
         task_id = task["task_id"]
         # Tag the context so any sub-task the agent spawns records this as parent.
+        # A retried or restart-recovered task whose run stopped partway continues
+        # from its checkpoint instead of re-sending the prompt and starting over
+        # (gh #249). A new task's thread has no checkpoint, so it starts fresh.
+        resumable = await self._has_unfinished_run(task["thread_id"])
         token = current_task_id.set(task_id)
         try:
-            session = self._adapter.submit_message(
-                task["thread_id"],
-                task["prompt"],
-                context_parts=[f"[{self._context_label}: {task.get('title', task_id)}]"],
-            )
+            if resumable:
+                session = self._adapter.submit_continue(task["thread_id"])
+            else:
+                session = self._adapter.submit_message(
+                    task["thread_id"],
+                    task["prompt"],
+                    context_parts=[f"[{self._context_label}: {task.get('title', task_id)}]"],
+                )
         finally:
             current_task_id.reset(token)
         await self._await_run(task_id, session)
+
+    async def _has_unfinished_run(self, thread_id: str) -> bool:
+        """Whether ``thread_id`` stopped partway (an adapter without the check: no)."""
+        check = getattr(self._adapter, "has_unfinished_run", None)
+        if check is None or not hasattr(self._adapter, "submit_continue"):
+            return False
+        try:
+            return bool(await check(thread_id))
+        except Exception:  # pragma: no cover - the adapter's check is best-effort
+            logger.exception("checking thread %s for an unfinished run failed", thread_id)
+            return False
 
     async def _resume_run(
         self, task: Task, decisions: list[dict[str, Any]]

@@ -202,6 +202,48 @@ class SessionAdapter:
         )
         return session
 
+    async def has_unfinished_run(self, session_id: str | None) -> bool:
+        """True when the session's thread stopped partway through a run.
+
+        That is, its last checkpoint still has nodes to run (``next`` is non-empty):
+        the run raised, was cancelled, or is paused on an interrupt. Such a run can be
+        continued with :meth:`submit_continue` instead of being started over (gh #249).
+        False when there is no checkpoint for the thread, the last run finished, or the
+        state can't be read.
+        """
+        if session_id is None:
+            return False
+        try:
+            from ..agui import build_agent
+
+            if self._agui_agent is None:
+                self._agui_agent = build_agent(self._graph)
+            graph = getattr(self._agui_agent, "graph", None)
+            if graph is None or getattr(graph, "checkpointer", None) is None:
+                return False
+            session = self._sessions.get(session_id)
+            thread_id = (
+                session.config.get("configurable", {}).get("thread_id", session_id)
+                if session is not None else session_id
+            )
+            snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+        except Exception:  # noqa: BLE001 - unknown means "start a fresh turn", as before
+            return False
+        return bool(getattr(snapshot, "next", None))
+
+    def submit_continue(self, session_id: str | None) -> Session:
+        """Continue a run that stopped partway, from the thread's last checkpoint.
+
+        No user message is added and finished nodes don't run again; the run picks up
+        at the checkpoint's ``next`` node (gh #249). Check :meth:`has_unfinished_run`
+        first. A thread paused on an interrupt re-raises the interrupt. Cancels any
+        in-flight turn first.
+        """
+        session = self.get_or_create(session_id)
+        session.cancel_current()
+        session.current_task = asyncio.create_task(self._produce(session, continue_run=True))
+        return session
+
     def cancel(self, session_id: str) -> bool:
         """Cancel the in-flight turn for a session. Returns True if one ran."""
         session = self._sessions.get(session_id)
@@ -226,6 +268,7 @@ class SessionAdapter:
         *,
         message: str = "",
         resume: Any = None,
+        continue_run: bool = False,
     ) -> None:
         """Run one turn through the in-process AG-UI adapter, pushing serialized
         ``event_to_dict`` frames onto the session queue and recording the terminal
@@ -262,6 +305,7 @@ class SessionAdapter:
                 resume=resume,
                 max_result_len=self._max_result_len,
                 extractors=self._extractors,
+                continue_run=continue_run,
             ):
                 session.push(data)
                 kind = data.get("type")

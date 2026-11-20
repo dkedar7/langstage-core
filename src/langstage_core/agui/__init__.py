@@ -196,6 +196,14 @@ def _agent_class(base: Any) -> Any:
 
             def get_stream_kwargs(self, *args, **kwargs):
                 out = super().get_stream_kwargs(*args, **kwargs)
+                if getattr(self, "_langstage_continue", False) and isinstance(
+                    out.get("input"), dict
+                ):
+                    # Continue a run that stopped partway (TaskRunner.retry, gh #249):
+                    # no new input, so LangGraph picks up at the checkpoint's ``next``
+                    # node instead of starting over from START. Only the plain-state
+                    # input is swapped; a resume ``Command`` is never touched.
+                    out["input"] = None
                 if "context" in out:
                     context = _run_context(self.graph, out["context"])
                     if context:
@@ -1987,6 +1995,7 @@ async def iter_event_frames(
     max_result_len: int = 500,
     extractors: Any = (),
     state: Any = None,
+    continue_run: bool = False,
 ):
     """Drive an ``ag-ui-langgraph`` agent in-process and yield ``event_to_dict``-
     shaped frames — the SAME wire vocabulary ``StreamParser`` + ``event_to_dict``
@@ -2019,6 +2028,12 @@ async def iter_event_frames(
     :class:`~langstage_core.GenericToolExtractor`) is used as the *fallback* for any
     tool without a specific extractor, so a generic tool-callout card can render
     without per-tool knowledge (gh #90).
+
+    ``continue_run=True`` (``message`` and ``resume`` are ignored) continues a run that
+    stopped partway, for example on an exception or a cancel: the graph gets no new
+    input and resumes at the thread's last checkpoint, so finished nodes don't run
+    again and no user message is added (gh #249). It needs an agent built by
+    :func:`build_agent`; a thread paused on an interrupt re-raises that interrupt.
     """
     try:
         from ag_ui.core.types import RunAgentInput, UserMessage
@@ -2081,13 +2096,20 @@ async def iter_event_frames(
         # (TypeError mid-stream). clone() keeps the graph + checkpointer (thread
         # state) but isolates the run, like build_app / SessionAdapter. (gh #165)
         agent = agent.clone() if hasattr(agent, "clone") else agent
+        if continue_run:
+            # Read by LangStageGraphAgent.get_stream_kwargs: stream with no input.
+            agent._langstage_continue = True
+            resume = None
         # Built after the agent: the resume rides RunAgentInput.resume[] keyed by the
         # thread's pending interrupt id, read from the agent's checkpoint (gh #144).
         run_input = RunAgentInput(
             thread_id=thread_id,
             run_id=str(uuid.uuid4()),
             state=dict(state or {}),
-            messages=[UserMessage(id=str(uuid.uuid4()), role="user", content=message)],
+            messages=(
+                [] if continue_run
+                else [UserMessage(id=str(uuid.uuid4()), role="user", content=message)]
+            ),
             tools=[],
             context=[],
             **await _resume_input_fields(agent, thread_id, resume),
