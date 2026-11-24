@@ -27,6 +27,7 @@ stdout (click's own echo raises on an unencodable char just like ``print``).
 from __future__ import annotations
 
 import contextlib
+import io
 import sys
 from collections.abc import Iterator
 from typing import IO, Any
@@ -154,9 +155,58 @@ class _SafeStderr:
         return getattr(self._target, name)
 
 
+def _move_stdout_off_fd1(stream: Any) -> tuple[Any, Any]:
+    """Give ``stream`` (the real stdout) its own descriptor and point fd 1 at stderr.
+
+    Returns ``(out, restore)``: ``out`` writes where ``stream`` did, with the same
+    encoding, error handler and newline translation; ``restore()`` flushes it and puts
+    the original fd 1 back. When ``stream`` isn't the process's real fd 1 (a test
+    capture, ``io.StringIO``, pythonw with no stdout) or the descriptors can't be
+    duplicated, nothing moves and ``(stream, None)`` comes back. (gh #252, the
+    langstage-vscode #189 fix.)
+    """
+    import os
+
+    try:
+        if stream is None or stream.fileno() != 1:
+            return stream, None
+        stream.flush()
+        out_fd = os.dup(1)
+    except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        return stream, None
+    try:
+        os.dup2(2, 1)
+    except OSError:  # no usable stderr: leave fd 1 alone
+        os.close(out_fd)
+        return stream, None
+    # newline=None writes os.linesep, as the interpreter's own stdout does, so the
+    # reply is byte-for-byte what it was.
+    out = open(  # noqa: SIM115 - closed by restore()
+        out_fd, "w", encoding=getattr(stream, "encoding", None) or "utf-8",
+        errors=getattr(stream, "errors", None) or "strict", newline=None,
+        buffering=1 if getattr(stream, "line_buffering", False) else -1,
+    )
+
+    def restore() -> None:
+        try:
+            out.flush()
+        except (OSError, ValueError):  # the reader closed the pipe: the caller reports it
+            pass
+        try:
+            os.dup2(out_fd, 1)
+        except OSError:
+            pass
+        try:
+            out.close()
+        except (OSError, ValueError):
+            pass
+
+    return out, restore
+
+
 @contextlib.contextmanager
 def agent_stdout_to_stderr() -> Iterator[IO[str]]:
-    """Run an agent turn with its prints sent to stderr; yield the real stdout.
+    """Run an agent turn with its output sent to stderr; yield the real stdout.
 
     A machine-readable one-shot path (``langstage-agui -m`` / ``--json`` /
     ``--verify``) owns stdout: it carries only the reply, the JSON document or the
@@ -168,10 +218,22 @@ def agent_stdout_to_stderr() -> Iterator[IO[str]]:
             result = run_the_turn()
             safe_print(json.dumps(result), file=out)
 
+    Two levels are covered. ``sys.stdout`` points at stderr, for ``print`` and
+    ``sys.stdout.write``. And when stdout is the process's real file descriptor 1,
+    the yielded stream gets its own copy of that descriptor while fd 1 points at
+    stderr, so a child process the agent starts (``os.system``, ``subprocess.run``
+    without ``capture_output``) or native code writing to fd 1 can't glue text onto
+    the reply either (gh #252). Use the yielded stream only inside the block.
+
     The diverted text is escaped like :func:`safe_write`, so an agent printing a
     character stderr can't encode no longer kills the turn on cp1252.
-    ``sys.stdout`` is restored on exit; nothing is reconfigured.
+    ``sys.stdout`` and fd 1 are restored on exit; nothing is reconfigured.
     """
     real = sys.stdout
-    with contextlib.redirect_stdout(_SafeStderr(sys.stderr)):  # type: ignore[arg-type]
-        yield real
+    out, restore = _move_stdout_off_fd1(real)
+    try:
+        with contextlib.redirect_stdout(_SafeStderr(sys.stderr)):  # type: ignore[arg-type]
+            yield out
+    finally:
+        if restore is not None:
+            restore()
