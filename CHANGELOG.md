@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.68] - 2026-11-24
+
+### Fixed
+- **`langstage-agui -m`, `--json` and `--verify` keep stdout clean when the agent's
+  process tree writes to file descriptor 1 (gh #252).** gh #235 sent the turn's
+  `print`s to stderr by swapping `sys.stdout`, but a child process the agent starts
+  (`os.system`, `subprocess.run` without `capture_output`) inherits fd 1, and native
+  code writes to it directly, so its text could still glue onto the reply or the JSON
+  document. `agent_stdout_to_stderr()` now also gives the yielded stream its own copy
+  of fd 1 and points fd 1 at stderr for the block, then puts it back (the
+  langstage-vscode #189 fix). When stdout isn't the process's real fd 1 (a test
+  capture, `io.StringIO`), only `sys.stdout` is swapped, as before.
+
 ## [1.0.67] - 2026-11-20
 
 ### Fixed
