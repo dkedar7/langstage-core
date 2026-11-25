@@ -49,6 +49,13 @@ __all__ = [
     "DEFAULT_AGENT_NAME",
 ]
 
+from ..keyhint import describe_error, with_key_hint  # noqa: E402
+
+
+def _hinted(message):
+    """A RUN_ERROR message with the missing-key hint appended (gh #253); non-strings pass through."""
+    return with_key_hint(message) if isinstance(message, str) else message
+
 DEFAULT_AGENT_NAME = "LangStage Agent"
 
 _IMPORT_HINT = (
@@ -372,7 +379,7 @@ def add_agui_endpoint(
                 yield encoder.encode(
                     RunErrorEvent(
                         type=EventType.RUN_ERROR,
-                        message=f"{type(exc).__name__}: {exc}",
+                        message=describe_error(exc),
                     )
                 )
 
@@ -2279,14 +2286,14 @@ async def iter_event_frames(
                                 yield {"type": "extraction", "tool_name": item["name"],
                                        "extracted_type": extractor.extracted_type, "data": data}
             elif t == "RunErrorEvent":
-                yield {"type": "error", "error": getattr(ev, "message", "unknown error")}
+                yield {"type": "error", "error": _hinted(getattr(ev, "message", "unknown error"))}
                 return
 
     except Exception as exc:  # noqa: BLE001 — a node/graph exception during streaming surfaces
         # as the documented terminal `error` frame instead of propagating out of the iterator
         # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
         # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
-        yield {"type": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
+        yield {"type": "error", "error": describe_error(exc), **_debug_traceback_extra()}
         return
 
     # The terminal frame names the outcome, so a paused HITL turn is distinguishable
@@ -2555,7 +2562,7 @@ async def iter_chunk_frames(
                                                       "extracted_type": extractor.extracted_type,
                                                       "data": data}}
             elif t == "RunErrorEvent":
-                yield {"status": "error", "error": getattr(ev, "message", "unknown error")}
+                yield {"status": "error", "error": _hinted(getattr(ev, "message", "unknown error"))}
                 # Terminal, exactly like the event wire and the exception path below:
                 # without this return a trailing `complete` followed the error (gh #161).
                 return
@@ -2564,7 +2571,7 @@ async def iter_chunk_frames(
         # as the documented terminal `error` frame instead of propagating out of the iterator
         # and crashing the consumer's `async for` (gh #93). Same treatment build_app.gen() and
         # SessionAdapter already apply; the bare upstream adapter lets node exceptions propagate.
-        yield {"status": "error", "error": f"{type(exc).__name__}: {exc}", **_debug_traceback_extra()}
+        yield {"status": "error", "error": describe_error(exc), **_debug_traceback_extra()}
         return
 
     # Names the outcome ("interrupted" after an `interrupt` chunk, else "complete"),

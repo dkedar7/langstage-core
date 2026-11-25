@@ -333,8 +333,10 @@ class SessionAdapter:
             raise
         except Exception as exc:  # noqa: BLE001 — surfaced to the client, not swallowed
             session.outcome = "error"
-            session.error = f"{type(exc).__name__}: {exc}"
-            session.push({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
+            from ..keyhint import describe_error
+
+            session.error = describe_error(exc)
+            session.push({"type": "error", "error": session.error})
 
     # ── Consuming (SSE) ──────────────────────────────────────────────
 

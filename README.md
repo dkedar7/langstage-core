@@ -29,7 +29,7 @@ The shared core behind the **[LangStage](https://github.com/dkedar7/langstage) f
 pip install "langstage-core[agui]"
 ```
 
-The `[agui]` extra pulls the AG-UI runtime (`ag-ui-langgraph[fastapi]` + `uvicorn`) — needed for the streaming bridge below and by every LangStage surface. The bare `pip install langstage-core` (only `langchain-core`) covers the host/config layer only (`load_agent_spec`, `HostConfig`, the resume helpers). The task engine needs `[agui]` too: `SessionAdapter` drives every task through the AG-UI bridge, so on a bare install each task ends `failed`.
+The `[agui]` extra pulls the AG-UI runtime (`ag-ui-langgraph[fastapi]` + `uvicorn`) — needed for the streaming bridge below and by every LangStage surface. The bare `pip install langstage-core` (only `langchain-core`) covers the host/config layer only (`load_agent_spec`, `HostConfig`, and the decision helpers such as `normalize_decision`). The resume helpers (`create_resume_input`, `prepare_agent_input(decisions=...)`) build a LangGraph `Command`, so they need `langgraph`, which `[agui]` brings in; on a bare install they raise a `ModuleNotFoundError` that says what to install. The task engine needs `[agui]` too: `SessionAdapter` drives every task through the AG-UI bridge, so on a bare install each task ends `failed`.
 
 No agent of your own yet? The `[stub]` extra adds a keyless echo graph you can stream:
 
