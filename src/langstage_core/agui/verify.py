@@ -131,7 +131,9 @@ async def averify(
         result.reason = f"timed out after {timeout:g}s"
         return result
     except Exception as exc:  # noqa: BLE001 - any failure IS a failed preflight
-        result.reason = f"{type(exc).__name__}: {exc}"
+        from ..keyhint import describe_error
+
+        result.reason = describe_error(exc)
         from . import _debug_traceback_extra
 
         result.traceback = _debug_traceback_extra().get("traceback")

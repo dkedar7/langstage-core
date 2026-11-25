@@ -6,6 +6,11 @@ a LangGraph agent after an interrupt.
 """
 from typing import Any
 
+_LANGGRAPH_HINT = (
+    "the resume helpers build a LangGraph Command and need langgraph, which the bare "
+    'install leaves out: pip install "langstage-core[agui]" (or pip install langgraph)'
+)
+
 
 def create_resume_input(
     decisions: list[dict[str, Any]] | None = None,
@@ -52,8 +57,12 @@ def create_resume_input(
     if decisions is not None and value is not None:
         raise ValueError("Cannot provide both 'decisions' and 'value'")
 
-    # Import Command lazily to avoid hard dependency
-    from langgraph.types import Command
+    # Import Command lazily to avoid a hard dependency: the bare install is
+    # langchain-core only, so say what to install instead of a raw traceback (gh #255).
+    try:
+        from langgraph.types import Command
+    except ImportError as exc:
+        raise ModuleNotFoundError(_LANGGRAPH_HINT, name="langgraph") from exc
 
     if decisions is not None:
         return Command(resume={"decisions": decisions})

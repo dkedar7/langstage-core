@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.69] - 2026-11-25
+
+### Fixed
+- **A missing provider key that fails as a connection error now names the key
+  (gh #253).** With no key, langchain-anthropic sends an empty `Authorization`
+  header and the turn fails with `AnthropicConnectionError: Connection error.`,
+  which reads like a network problem. Every error line core formats (the event and
+  chunk wires, a served `RUN_ERROR`, `langstage-agui -m` / `--json` / `--verify`,
+  `SessionAdapter` tasks) now ends with `(hint: ANTHROPIC_API_KEY is not set)` when
+  the error is a connection error from a known provider and that provider's key
+  variable is unset or blank. Only the variable's name is printed, never a value.
+  A wrong key's 401 is unchanged. The helpers are in `langstage_core.keyhint`
+  (`describe_error`, `with_key_hint`, `missing_key_hint`) for surfaces that format
+  their own errors.
+- **On a bare install, the resume helpers say what to install (gh #255).**
+  `create_resume_input` and `prepare_agent_input(decisions=...)` build a LangGraph
+  `Command`, and the bare install has no `langgraph`, so they raised a raw
+  `ModuleNotFoundError`. They still raise `ModuleNotFoundError` (with
+  `name="langgraph"`), but the message now says
+  `pip install "langstage-core[agui]"`. The README no longer lists them as working
+  on the bare install.
+
 ## [1.0.68] - 2026-11-24
 
 ### Fixed
