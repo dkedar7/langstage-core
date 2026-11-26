@@ -1895,8 +1895,14 @@ def _interrupt_raw_value(ev, pending_by_id):
 
 
 async def _decode_interrupt(ev, agent, thread_id, cache: dict):
-    """``(action_requests, review_configs, allowed_decisions)`` for an ``on_interrupt``
-    event — the one decoder both ``iter_*`` wires share.
+    """``(action_requests, review_configs, allowed_decisions, hitl)`` for an
+    ``on_interrupt`` event — the one decoder both ``iter_*`` wires share.
+
+    ``hitl`` is True only when the source value is a HumanInTheLoopMiddleware request
+    (a dict keyed ``action_requests``). Every frame is normalized into that shape, so
+    the frame alone can't tell a legacy ``HumanInterrupt`` list or a custom
+    ``interrupt(...)`` apart from a middleware request; ``decision_problems`` reads
+    this flag to check only what the middleware itself checks (gh #257).
 
     ``action_requests`` / ``review_configs`` come from the event's JSON-safe value (what
     a surface can serialize). ``allowed_decisions`` is re-derived from the checkpoint's
@@ -1925,7 +1931,9 @@ async def _decode_interrupt(ev, agent, thread_id, cache: dict):
     raw_value = _interrupt_raw_value(ev, cache["pending"])
     if raw_value is not None:
         decisions = _normalize_interrupt(raw_value)[2]
-    return action_requests, review_configs, decisions
+    source = raw_value if raw_value is not None else payload
+    hitl = isinstance(source, dict) and "action_requests" in source
+    return action_requests, review_configs, decisions, hitl
 
 
 def _terminal_outcome(*, saw_interrupt: bool, saw_error: bool) -> str:
@@ -2220,7 +2228,7 @@ async def iter_event_frames(
                 # Shared decoder: a string payload stays a single action request
                 # (cli #95), the HumanInterrupt list is unwrapped (vscode #40), and
                 # allowed_decisions honors the interrupt's own config (vscode #114).
-                action_requests, review_configs, decisions = await _decode_interrupt(
+                action_requests, review_configs, decisions, hitl = await _decode_interrupt(
                     ev, agent, thread_id, interrupt_cache
                 )
                 saw_interrupt = True
@@ -2229,6 +2237,7 @@ async def iter_event_frames(
                     "action_requests": action_requests,
                     "review_configs": review_configs,
                     "allowed_decisions": decisions,
+                    "hitl": hitl,
                 }
             elif t == "MessagesSnapshotEvent":
                 # The final snapshot carries every message the turn produced. Emit the
@@ -2497,7 +2506,7 @@ async def iter_chunk_frames(
                 # (cli: interrupt_data.get("action_requests")) doesn't crash on the
                 # standard HumanInterrupt *list* shape and gets a populated request (#40);
                 # same shared decoder as the event wire (cli #95, vscode #114).
-                action_requests, review_configs, decisions = await _decode_interrupt(
+                action_requests, review_configs, decisions, hitl = await _decode_interrupt(
                     ev, agent, thread_id, interrupt_cache
                 )
                 saw_interrupt = True
@@ -2507,6 +2516,7 @@ async def iter_chunk_frames(
                         "action_requests": action_requests,
                         "review_configs": review_configs,
                         "allowed_decisions": decisions,
+                        "hitl": hitl,
                     },
                 }
             elif t == "MessagesSnapshotEvent":
