@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.70] - 2026-11-26
+
+### Fixed
+- **Answers to a legacy or custom interrupt are no longer refused by the frame
+  checks (gh #257).** The wire normalizes every interrupt into the
+  `action_requests` shape, so `decision_problems(resume, frame)` ran the
+  HumanInTheLoopMiddleware checks on every `interrupt` frame. `TaskRunner.resume`,
+  which checks the stored frame, raised `InvalidDecisionError` for answers the graph
+  accepts (a legacy `HumanResponse`, a custom interrupt's own payload), and the task
+  stayed in `review_needed`. Interrupt frames on both wires now carry an additive
+  `hitl` key, `true` only when the source is a middleware request, and
+  `decision_problems` checks only those. A frame without the key (from an older
+  core) keeps the previous shape test.
+
 ## [1.0.69] - 2026-11-25
 
 ### Fixed

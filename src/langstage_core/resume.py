@@ -248,7 +248,17 @@ class InvalidDecisionError(ValueError):
 
 
 def _is_hitl_request(value: Any) -> bool:
-    return isinstance(value, dict) and isinstance(value.get("action_requests"), list)
+    """Whether ``value`` is a HumanInTheLoopMiddleware request.
+
+    The graph's own value is one when it's a dict keyed ``action_requests``. An
+    ``interrupt`` frame always has that key, because the wire normalizes every
+    interrupt into the same shape, so a frame says which it was in ``hitl`` (since
+    1.0.70, gh #257). A frame without the key (an older core) keeps the shape test.
+    """
+    if not (isinstance(value, dict) and isinstance(value.get("action_requests"), list)):
+        return False
+    flag = value.get("hitl")
+    return flag if isinstance(flag, bool) else True
 
 
 def _allowed_for(i: int, action: Any, interrupt: dict) -> list:
